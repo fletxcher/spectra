@@ -1,4 +1,4 @@
-# Python-generated files
+# python-generated files
 __pycache__/
 *.py[oc]
 build/
@@ -6,8 +6,8 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual environments
+# virtual environments
 .venv
 
-# Generated simulation output (regenerate with `spectra sweep`)
-datasets/run_*/
+# generated simulation output 
+datasets/
