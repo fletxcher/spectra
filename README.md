@@ -1,4 +1,4 @@
-# spectra
+# SPECTRA
 
 **S**teady **P**oint **E**xtraction and **C**lustering for **T**ransient **R**egime **A**nalysis
 
@@ -106,20 +106,25 @@ emissions prediction tool. Key simplifications:
 Assumptions about grid demand seasonality/shape and turbine startup/loading
 behavior were informed by:
 
-- EIA, *Electricity Load Shapes* handbook — https://www.eia.gov/analysis/handbook/pdf/Handbook%20Section%20B3_Electricity%20Load%20Shapes.pdf
-- EIA, *Today in Energy* (seasonal/diurnal demand articles) — https://www.eia.gov/todayinenergy/detail.php?id=10211, id=46117, id=29112
-- ENTSO-E, *Winter Outlook* / *Summer Outlook* reports — https://eepublicdownloads.entsoe.eu
-- ISO New England, *System Load Graph* — https://isonewswire.com/2025/06/16/system-load-graph-tracks-ebb-and-flow-of-daily-electricity-use/
-- Green Building Advisor, duck-curve explainer — https://www.greenbuildingadvisor.com/article/an-introduction-to-the-duck-curve
-- ORF, *Energy News Monitor* (Indian peak demand) — https://www.orfonline.org/research/energy-news-monitor-volume-xxii-issue-39
-- Powerline, *Demand Uptick: Key Drivers* (Indian peak demand) — https://powerline.net.in/2026/07/03/demand-uptick-key-drivers-and-initiatives-to-meet-the-growing-power-requirement/
-- Combined Cycle Journal, *Turbine Tip No. 7* (startup sequencing) — https://ccj-online.com/?p=12204
-- control.com forums — gas turbine startup sequencing, synchronization, and loading-rate discussions (Frame 9E.03 barring-to-sync time; fast-load rate; GT ramp load capacity; Frame 9 start-up sequence threads) — https://control.com/forums
-- US Patent 11,255,218, *Method for starting up a gas turbine engine of a combined cycle power plant*
-- US Patent 4,010,605, *Fixed time acceleration gas turbine startup speed control*
-- US Patent 5,732,546, *Transient turbine overtemperature control*
+- [EIA, Electricity Load Shapes handbook](https://www.eia.gov/analysis/handbook/pdf/Handbook%20Section%20B3_Electricity%20Load%20Shapes.pdf)
+- [EIA, Today in Energy — id=10211](https://www.eia.gov/todayinenergy/detail.php?id=10211)
+- [EIA, Today in Energy — id=46117](https://www.eia.gov/todayinenergy/detail.php?id=46117)
+- [EIA, Today in Energy — id=29112](https://www.eia.gov/todayinenergy/detail.php?id=29112)
+- [ENTSO-E, Winter/Summer Outlook reports](https://eepublicdownloads.entsoe.eu)
+- [ISO New England, System Load Graph](https://isonewswire.com/2025/06/16/system-load-graph-tracks-ebb-and-flow-of-daily-electricity-use/)
+- [Green Building Advisor, duck-curve explainer](https://www.greenbuildingadvisor.com/article/an-introduction-to-the-duck-curve)
+- [ORF, Energy News Monitor (Indian peak demand)](https://www.orfonline.org/research/energy-news-monitor-volume-xxii-issue-39)
+- [Powerline, Demand Uptick: Key Drivers (Indian peak demand)](https://powerline.net.in/2026/07/03/demand-uptick-key-drivers-and-initiatives-to-meet-the-growing-power-requirement/)
+- [Combined Cycle Journal, Turbine Tip No. 7 (startup sequencing)](https://ccj-online.com/?p=12204)
+- [control.com forum, Frame 9E.03 time from barring to sync](https://control.com/forums/threads/51486)
+- [control.com forum, fast load rate](https://control.com/forums/threads/fast-load-rate.47614/post-47614)
+- [control.com forum, gas turbine ramp load capacity](https://control.com/forums/threads/gas-turbine-ramp-load-capacity.50333/)
+- [control.com forum, start-up sequence of GT Frame 9](https://control.com/forums/threads/start-up-sequence-of-gt-frame-9.48018/post-48018)
+- [US Patent 11,255,218, Method for starting up a gas turbine engine of a combined cycle power plant](https://patents.google.com/patent/US11255218B2)
+- [US Patent 4,010,605, Fixed time acceleration gas turbine startup speed control](https://patents.google.com/patent/US4010605A)
+- [US Patent 5,732,546, Transient turbine overtemperature control](https://patents.google.com/patent/US5732546A)
 
 Combustion chemistry:
 
-- Cantera — https://cantera.org
-- G. P. Smith et al., *GRI-Mech 3.0* — http://www.me.berkeley.edu/gri_mech/
+- [Cantera](https://cantera.org)
+- [G. P. Smith et al., GRI-Mech 3.0](http://www.me.berkeley.edu/gri_mech/)
