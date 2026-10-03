@@ -114,6 +114,9 @@ def sample_sweep(
     seed: int = 0,
     bounds: SweepBounds = SweepBounds(),
     ramp_bounds: RampBounds = RampBounds(),
+    fine_dt: float = 30.0,
+    coarse_dt: float = 300.0,
+    fine_window: float = 300.0,
 ) -> list[SimCase]:
     """Latin-hypercube sample over continuous engine/site params; each case
     is independently assigned a region (cycled for even coverage) and a
@@ -149,6 +152,9 @@ def sample_sweep(
                 idle_phi=idle_phi,
                 base_load_phi=base_load_phi,
                 min_load_fraction=min_load_fraction,
+                fine_dt=fine_dt,
+                coarse_dt=coarse_dt,
+                fine_window=fine_window,
             )
         )
     return cases
