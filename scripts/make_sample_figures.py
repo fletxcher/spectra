@@ -60,14 +60,13 @@ def make_detection_before_after(run_id: str = "run_00000", days: float = 3.0) ->
 
     tmin, tmax = temp.min(), temp.max()
     trange = tmax - tmin
-    # baseline sits below the data (0 = not steady); the "1" level rises up
-    # into the lower portion of the actual temperature trace, so the signal
-    # visibly points up toward the series instead of staying in a separate
-    # strip entirely beneath it. Both levels are fixed from the same tmin/
-    # tmax for this window, so they land at the identical position in both
-    # panels below.
+    # baseline sits at the very bottom (0 = not steady); "1" swings all the
+    # way up to the top of the chart, a clear, large upward jump rather than
+    # a small bump near the floor. Both levels are fixed from the same
+    # tmin/tmax for this window, so they land at the identical position in
+    # both panels below.
     y_low = tmin - 0.08 * trange
-    y_high = tmin + 0.15 * trange
+    y_high = tmax + 0.08 * trange
 
     fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
     panels = [
@@ -83,7 +82,7 @@ def make_detection_before_after(run_id: str = "run_00000", days: float = 3.0) ->
         ax.plot(time_days, temp, color="tab:red", lw=0.6, label="chamber temperature (observed)", zorder=2)
         detector_y = np.where(pred == 1, y_high, y_low)
         ax.plot(time_days, detector_y, color="tab:blue", lw=1.4, drawstyle="steps-post", label="detector", zorder=3)
-        ax.set_ylim(y_low - 0.02 * trange, tmax + 0.05 * trange)
+        ax.set_ylim(y_low - 0.02 * trange, y_high + 0.02 * trange)
         ax.set_ylabel("temperature [K]")
         ax.set_title(title)
 
