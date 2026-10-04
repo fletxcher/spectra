@@ -142,6 +142,16 @@ channels and all 9 regions.
 scale/noise/timescale, solves the stated task well (`ssd_cpd_tuned`
 F1~=0.97, near-instant detection).**
 
+`ssd_cpd` run on `run_00000`'s temperature channel, library defaults vs.
+tuned, against the ground-truth steady regions (shaded gray):
+
+![ssd_cpd before and after tuning](samples/united_states/detection_before_after.png)
+
+The default (top) essentially never calls anything steady here, consistent
+with its poor aggregate F1 above. The tuned version (bottom) tracks the
+ground truth closely, correctly dropping to 0 during each ramp and
+recovering to 1 once the window settles.
+
 ```bash
 .venv/bin/python -c "
 from src.eval.run_eval import evaluate_sweep
@@ -178,6 +188,12 @@ region's demand shape exactly as designed in Phase 1: single-peak regions
 **3-3.4 clusters** (silhouette ~=0.60).
 
 ### Example groupings
+
+The same groups, shown directly on the temperature trace they were
+extracted from (`run_00000`, United States, 3 regimes), rather than in the
+abstract load_fraction/temperature scatter space used below:
+
+![Groups on the actual time series](samples/united_states/clusters_on_timeseries.png)
 
 **run_00077 (Middle East, k=2, silhouette=0.71)**
 
