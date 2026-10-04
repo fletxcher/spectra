@@ -140,8 +140,7 @@ on the separate 40-run evaluation set, holding up consistently across all 4
 channels and all 9 regions.
 **Conclusion: classical detection, properly tuned to the data's actual
 scale/noise/timescale, solves the stated task well (`ssd_cpd_tuned`
-F1~=0.97, near-instant detection). No case found yet for reaching for ML
-on this task.**
+F1~=0.97, near-instant detection).**
 
 ```bash
 .venv/bin/python -c "
@@ -177,6 +176,29 @@ region's demand shape exactly as designed in Phase 1: single-peak regions
 (India, Middle East) consistently resolve to **2 clean clusters**
 (silhouette ~=0.72); double-peak regions (China, Europe, United States) need
 **3-3.4 clusters** (silhouette ~=0.60).
+
+### Example groupings
+
+**run_00077 (Middle East, k=2, silhouette=0.71)**
+
+| Group | Points | Temp [K] | Load Fraction | Phi | NOx [ppm] | CO [ppm] |
+|---|---|---|---|---|---|---|
+| Off-Peak / Low Load | 90 | 1949 | 0.74 | 0.58 | 20.6 | 560 |
+| Peak / High Load | 90 | 2136 | 0.92 | 0.70 | 108.9 | 888 |
+
+**run_00000 (United States, k=3, silhouette=0.63)**
+
+| Group | Points | Temp [K] | Load Fraction | Phi | NOx [ppm] | CO [ppm] |
+|---|---|---|---|---|---|---|
+| Low Load | 68 | 1826 | 0.77 | 0.55 | 8.6 | 432 |
+| Mid Load | 80 | 1950 | 0.87 | 0.62 | 27.2 | 485 |
+| Peak / High Load | 32 | 2049 | 0.96 | 0.68 | 71.3 | 632 |
+
+![Example groupings](samples/clustering_example.png)
+
+The single-peak region needs only 2 groups to cleanly separate its steady
+points; the double-peak region needs 3, matching the diurnal shape
+difference documented above.
 
 **Caveat**: within a single run, engine design is fixed and phi / load /
 temperature / pressure / mass flow are all deterministic functions of one
