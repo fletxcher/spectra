@@ -194,11 +194,26 @@ region's demand shape exactly as designed in Phase 1: single-peak regions
 | Mid Load | 80 | 1950 | 0.87 | 0.62 | 27.2 | 485 |
 | Peak / High Load | 32 | 2049 | 0.96 | 0.68 | 71.3 | 632 |
 
+**run_00006 (Europe, HDBSCAN, 6 regimes, silhouette=0.38)**
+
+| Group | Points | Temp [K] | Load Fraction | Phi | NOx [ppm] | CO [ppm] |
+|---|---|---|---|---|---|---|
+| Minimum Load | 9 | 1875 | 0.77 | 0.55 | 11.7 | 229 |
+| Low Load | 32 | 1908 | 0.80 | 0.57 | 16.9 | 231 |
+| Mid Load | 22 | 1944 | 0.83 | 0.59 | 25.1 | 237 |
+| Above-Average Load | 56 | 1992 | 0.87 | 0.62 | 43.2 | 257 |
+| Unclassified / Transitional | 28 | 2012 | 0.89 | 0.63 | 74.5 | 296 |
+| Near-Peak Load | 21 | 2025 | 0.90 | 0.64 | 61.7 | 278 |
+| Peak Load | 12 | 2057 | 0.93 | 0.66 | 87.7 | 309 |
+
 ![Example groupings](samples/clustering_example.png)
 
 The single-peak region needs only 2 groups to cleanly separate its steady
-points; the double-peak region needs 3, matching the diurnal shape
-difference documented above.
+points; the double-peak United States region needs 3; Europe's run here
+resolves to 6 via HDBSCAN, with 28 points flagged as "Unclassified /
+Transitional" rather than forced into a regime they don't cleanly belong
+to. More regimes generally emerge from runs with larger or noisier demand
+swings, where the continuum of load levels splits into finer bands.
 
 **Caveat**: within a single run, engine design is fixed and phi / load /
 temperature / pressure / mass flow are all deterministic functions of one
