@@ -60,8 +60,14 @@ def make_detection_before_after(run_id: str = "run_00000", days: float = 3.0) ->
 
     tmin, tmax = temp.min(), temp.max()
     trange = tmax - tmin
-    y_low = tmin - 0.12 * trange
-    y_high = tmin - 0.02 * trange
+    # baseline sits below the data (0 = not steady); the "1" level rises up
+    # into the lower portion of the actual temperature trace, so the signal
+    # visibly points up toward the series instead of staying in a separate
+    # strip entirely beneath it. Both levels are fixed from the same tmin/
+    # tmax for this window, so they land at the identical position in both
+    # panels below.
+    y_low = tmin - 0.08 * trange
+    y_high = tmin + 0.15 * trange
 
     fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
     panels = [
