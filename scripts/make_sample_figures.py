@@ -60,13 +60,13 @@ def make_detection_before_after(run_id: str = "run_00000", days: float = 3.0) ->
 
     tmin, tmax = temp.min(), temp.max()
     trange = tmax - tmin
-    # baseline sits at the very bottom (0 = not steady); "1" swings all the
-    # way up to the top of the chart, a clear, large upward jump rather than
-    # a small bump near the floor. Both levels are fixed from the same
-    # tmin/tmax for this window, so they land at the identical position in
-    # both panels below.
-    y_low = tmin - 0.08 * trange
-    y_high = tmax + 0.08 * trange
+    pad = 0.05 * trange
+    # single coordinate system for everything: y_low is the exact bottom of
+    # the visible axes, y_high the exact top, so the detector line is flush
+    # against the plot border at both ends (no separate twin axis, no extra
+    # margin that would leave a gap) and identical in both panels below.
+    y_low = tmin - pad
+    y_high = tmax + pad
 
     fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
     panels = [
@@ -74,21 +74,17 @@ def make_detection_before_after(run_id: str = "run_00000", days: float = 3.0) ->
         (axes[1], pred_tuned, "ssd_cpd_tuned (calibrated)"),
     ]
     for ax, pred, title in panels:
-        ax_bg = ax.twinx()
-        ax_bg.fill_between(time_days, 0, is_steady, step="post", color="gray", alpha=0.2, label="ground truth steady", zorder=0)
-        ax_bg.set_ylim(0, 1)
-        ax_bg.set_yticks([])
-
+        ax.set_ylim(y_low, y_high)
+        ax.fill_between(
+            time_days, y_low, np.where(is_steady, y_high, y_low), step="post",
+            color="gray", alpha=0.2, label="ground truth steady", zorder=0,
+        )
         ax.plot(time_days, temp, color="tab:red", lw=0.6, label="chamber temperature (observed)", zorder=2)
         detector_y = np.where(pred == 1, y_high, y_low)
         ax.plot(time_days, detector_y, color="tab:blue", lw=1.4, drawstyle="steps-post", label="detector", zorder=3)
-        ax.set_ylim(y_low - 0.02 * trange, y_high + 0.02 * trange)
         ax.set_ylabel("temperature [K]")
         ax.set_title(title)
-
-        lines1, labels1 = ax.get_legend_handles_labels()
-        lines2, labels2 = ax_bg.get_legend_handles_labels()
-        ax.legend(lines2 + lines1, labels2 + labels1, loc="lower right", fontsize=8)
+        ax.legend(loc="lower right", fontsize=8)
 
     axes[1].set_xlabel("time [days]")
     fig.tight_layout()
