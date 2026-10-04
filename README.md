@@ -13,7 +13,7 @@ turbine's combustion chamber as a 0-D Cantera reactor network (GRI-Mech 3.0
 chemistry, CH4/H2 fuel blends) over a **30-day period**, with the dispatched
 setpoint (equivalence ratio / load) tracking realistic grid electricity
 demand for one of 9 world regions (United States, Canada, Central America,
-South America, Europe, Middle East, Russia, China, India) — demand is
+South America, Europe, Middle East, Russia, China, India); demand is
 re-evaluated every 4 hours from that region's seasonal + diurnal +
 weekday/weekend pattern, with realistic ramps (minutes, no overshoot) between
 levels. Ambient temperature follows the same region's diurnal/seasonal
@@ -31,15 +31,68 @@ uv run spectra sweep --n-cases 200 --out datasets --workers 8
 
 Output: one directory per run, `datasets/<run_id>/`, containing:
 
-- `data.parquet` — the time series (truth + noisy observed columns, plus
+- `data.parquet`: the time series (truth + noisy observed columns, plus
   per-timestep `segment_id` / `is_steady` ground truth)
-- `conditions.txt` — region, simulated date range, site/engine parameters,
+- `conditions.txt`: region, simulated date range, site/engine parameters,
   control-schedule setpoints, and a daily summary table of ambient
   temperature / load / phi / adiabatic flame temperature over the 30 days
-- `temperature.png` — chamber temperature (TIT proxy) vs. the equilibrium
+- `temperature.png`: chamber temperature (TIT proxy) vs. the equilibrium
   adiabatic flame temperature, over the full 30-day run
-- `emissions.png` — NOx and CO (converted from tracked species mass
+- `emissions.png`: NOx and CO (converted from tracked species mass
   fractions to molar ppm) over the full 30-day run
+
+### Regional climate & demand profiles
+
+Each run is assigned one of 9 world regions, which drives both its ambient
+temperature cycle and its grid-demand shape (`src/sim/regions.py`,
+`src/sim/demand.py`). What makes each region distinct:
+
+| Region | Climate (summer / winter high) | Diurnal swing | Demand peak(s) | Diurnal shape | Peak:trough |
+|---|---|---|---|---|---|
+| United States | 31°C / -2°C | 9°C | Summer (Jul, +32%), secondary winter (Jan, +15%) | Double (morning+evening) | 1.7x |
+| Canada | 27°C / -3.5°C | 9°C | Winter (Jan, +25%), secondary summer (Jul, +10%) | Double | 1.5x |
+| Central America | 32°C / 30.5°C | 6°C | Mild dry-season uptick (Feb, +8%) | Double | 1.5x |
+| South America | 29°C / 15°C | 8°C | Summer (Jan, +20%) + winter (Jul, +18%), hemisphere-inverted | Double | 1.6x |
+| Europe | 25°C / 4.5°C | 8°C | Winter (Jan, +20%), secondary summer (Jul, +10%) | Double | 1.5x |
+| Middle East | 43.5°C / 21.5°C | 13°C | Summer (Jul, +50%), most extreme | Single midday/AC | 1.9x |
+| Russia | 23°C / -6.5°C | 8°C | Winter (Jan, +30%) only | Double (flatter) | 1.4x |
+| China | 33°C / 2.5°C | 9°C | Summer (Jul, +25%) + winter (Jan, +15%), increasingly bimodal | Double | 1.6x |
+| India | 41.5°C / 21°C | 10°C | Summer (May, +35%), dips in monsoon | Single midday/AC | 1.9x |
+
+What actually differs between regions, physically:
+
+- **Climate** (summer/winter means + diurnal swing) sets the compressor
+  inlet temperature cycle, which directly moves adiabatic flame temperature
+  and achievable firing temperature for a given fuel/air ratio.
+- **Demand peak magnitude and month** sets how far above baseline the
+  dispatched load climbs, and when within the 30-day window. Each run's
+  start date is randomized, so different runs land on different parts of
+  the regional seasonal curve.
+- **Diurnal shape**: "double" (morning + evening peaks, trough overnight)
+  vs. "single_midday" (one broad AC-driven plateau through the
+  afternoon/evening). This changes the actual shape of the daily cycle in
+  the TIT trace.
+- **Peak:trough ratio** sets how deep the overnight minimum runs relative
+  to the daily peak.
+
+A full example run per region is included under `samples/<region>/`
+(`conditions.txt`, `temperature.png`, `emissions.png`; `data.parquet`
+omitted, ~10MB/run). Three contrasting examples:
+
+**United States**: double-peak, summer-dominant, moderate swing
+![United States temperature](samples/united_states/temperature.png)
+
+**Middle East**: single-peak (AC-driven), the most extreme seasonal/diurnal swing of any region
+![Middle East temperature](samples/middle_east/temperature.png)
+
+**Russia**: double-peak, with the flattest overnight troughs of any region
+(peak:trough 1.4x, lowest in the table), since winter heating demand
+persists through the night instead of dropping off like AC-driven load does
+![Russia temperature](samples/russia/temperature.png)
+
+The remaining 6 regions (Canada, Central America, South America, Europe,
+China, India) follow the same pattern and are available under their own
+`samples/<region>/` directory.
 
 ## Phase 2: steady-window detection (indsl)
 
@@ -47,7 +100,7 @@ Goal: reliably detect a continuous **>=60-second steady window** in the
 noisy "observed" trace. Ground truth for this is derived from the
 simulator's per-sample `is_steady` label via a rolling 60s AND (`src/eval/labels.py`):
 a point only counts as a valid steady window if every sample in the
-preceding 60 seconds was also steady, not just the point itself.
+preceding 60 seconds was also steady.
 
 All 8 univariate detectors in [indsl.detect](https://indsl.docs.cognite.com/detect.html)
 were run against 4 channels (chamber temperature, pressure, air mass flow,
@@ -59,13 +112,13 @@ phi) across a 40-run held-out sample (`src/eval/methods.py`, `run_eval.py`):
   "steady" 0% of the time (its default `drift` formula goes deeply negative
   on absolute-scale signals like Kelvin/Pascal, so it fires constantly).
   Their aggregate precision (~0.94-0.95) just matched the dataset's 94.5%
-  steady base rate — not genuine skill.
+  steady base rate, which is not genuine skill.
 - `ssid` looked good in a blended aggregate (F1=0.73) but that masked two
   different degenerate failure modes across channels, not real
   discrimination.
 - `unchanged_signal_detector` only works on the noise-free commanded `phi`
   signal (precision 0.996) and is actively worse than random on real noisy
-  sensor channels (precision 0.000) — it assumes exact repeated values,
+  sensor channels (precision 0.000); it assumes exact repeated values,
   which essentially never happens with Gaussian sensor noise.
 - `ssd_cpd` and `cusum`, with **library defaults**, showed real but
   channel-dependent signal (F1 0.13-0.94), tanked by two implementation
@@ -82,11 +135,12 @@ a diff-based noise-floor estimate rather than guessed:
 | `ssd_cpd` | 0.533 | **0.968** |
 | `cusum` | 0.000 | **0.947** |
 
-Both held up cleanly on the held-out evaluation set (not just the
-calibration data), consistently across all 4 channels and all 9 regions.
+Both generalized cleanly: tuned on the 5-run calibration slice, then scored
+on the separate 40-run evaluation set, holding up consistently across all 4
+channels and all 9 regions.
 **Conclusion: classical detection, properly tuned to the data's actual
 scale/noise/timescale, solves the stated task well (`ssd_cpd_tuned`
-F1~=0.97, near-instant detection) — no case found yet for reaching for ML
+F1~=0.97, near-instant detection). No case found yet for reaching for ML
 on this task.**
 
 ```bash
@@ -128,12 +182,12 @@ region's demand shape exactly as designed in Phase 1: single-peak regions
 temperature / pressure / mass flow are all deterministic functions of one
 demand signal, so they're nearly perfectly collinear (correlation
 ~=0.99-1.00, confirmed empirically). This clustering is therefore mostly
-finding good breakpoints along a 1-D ordered continuum (auto-selecting
-sensible regime boundaries/counts), not discovering independent
-multi-dimensional structure — still useful, but worth knowing. Clustering
-*across* runs (different engines/regions/fuel blends) would expose richer,
-genuinely multi-dimensional structure; this project clusters within a run
-by design choice.
+finding good breakpoints along a 1-D ordered continuum, auto-selecting
+sensible regime boundaries/counts rather than discovering independent
+multi-dimensional structure. Clustering *across* runs (different
+engines/regions/fuel blends) would expose richer, genuinely
+multi-dimensional structure; this project clusters within a run by design
+choice.
 
 ```bash
 .venv/bin/python -c "
@@ -160,7 +214,7 @@ emissions prediction tool. Key simplifications:
   liquid fuels.
 - The combustor starts pre-ignited: it's initialized at the full chemical
   equilibrium of the run's starting setpoint, skipping cold-start ignition
-  transients (which are out of scope — this project cares about
+  transients (which are out of scope; this project cares about
   steady/transient *operating-point* behavior, not ignition dynamics). This
   does leave a brief, non-physical first-sample artifact in trace species
   (NO/CO) that the emissions plot deliberately excludes from its axis scale.
@@ -176,14 +230,14 @@ emissions prediction tool. Key simplifications:
 **Dispatch / control schedule**
 - Equivalence ratio and load both scale linearly with a single normalized
   "demand" signal between a sampled turndown point and a sampled full-load
-  point — real multi-variable combustion control (staging, pilot/main
+  point. Real multi-variable combustion control (staging, pilot/main
   splits, IGV schedules) is not modeled.
 - Setpoint changes ramp over minutes without overshoot, consistent with how
   real heavy-duty turbine control systems actively avoid firing-temperature
   overshoot (see Resources). Fast cold-start/ignition transients are
   excluded by design (see above).
 - A run's seasonal baseline (the climatological "which month is it")
-  is fixed at that run's start date — only the diurnal and weekday/weekend
+  is fixed at that run's start date; only the diurnal and weekday/weekend
   components evolve across the 30 simulated days, since a calendar month's
   climatological mean does not meaningfully drift over just 30 days; that's
   a year-timescale effect, not a within-month one.
@@ -193,7 +247,7 @@ emissions prediction tool. Key simplifications:
 
 **Emissions**
 - NOx (NO+NO2) and CO are read directly from the kinetic simulation's
-  species mass fractions and converted to molar ppm (wet, uncorrected — no
+  species mass fractions and converted to molar ppm (wet, uncorrected; no
   dry-basis or 15%-O2 correction is applied). A single 0-D WSR tends to
   over-predict both relative to a real staged/lean-premix combustor, so
   treat these as relative trends across the sweep, not compliance-grade
@@ -210,9 +264,9 @@ Assumptions about grid demand seasonality/shape and turbine startup/loading
 behavior were informed by:
 
 - [EIA, Electricity Load Shapes handbook](https://www.eia.gov/analysis/handbook/pdf/Handbook%20Section%20B3_Electricity%20Load%20Shapes.pdf)
-- [EIA, Today in Energy — id=10211](https://www.eia.gov/todayinenergy/detail.php?id=10211)
-- [EIA, Today in Energy — id=46117](https://www.eia.gov/todayinenergy/detail.php?id=46117)
-- [EIA, Today in Energy — id=29112](https://www.eia.gov/todayinenergy/detail.php?id=29112)
+- [EIA, Today in Energy, id=10211](https://www.eia.gov/todayinenergy/detail.php?id=10211)
+- [EIA, Today in Energy, id=46117](https://www.eia.gov/todayinenergy/detail.php?id=46117)
+- [EIA, Today in Energy, id=29112](https://www.eia.gov/todayinenergy/detail.php?id=29112)
 - [ENTSO-E, Winter/Summer Outlook reports](https://eepublicdownloads.entsoe.eu)
 - [ISO New England, System Load Graph](https://isonewswire.com/2025/06/16/system-load-graph-tracks-ebb-and-flow-of-daily-electricity-use/)
 - [Green Building Advisor, duck-curve explainer](https://www.greenbuildingadvisor.com/article/an-introduction-to-the-duck-curve)
