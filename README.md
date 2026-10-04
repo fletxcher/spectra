@@ -148,9 +148,11 @@ tuned, against the ground-truth steady regions (shaded gray):
 ![ssd_cpd before and after tuning](samples/united_states/detection_before_after.png)
 
 The default (top) essentially never calls anything steady here, consistent
-with its poor aggregate F1 above. The tuned version (bottom) tracks the
-ground truth closely, correctly dropping to 0 during each ramp and
-recovering to 1 once the window settles.
+with its poor aggregate F1 above. The tuned version (bottom) correctly
+rests at 1 (steady) for most of the window, matching the dataset's 94.5%
+steady base rate, but only drops to 0 for 2 of the 17 true transitions in
+this 3-day slice; the rest pass through without a detected dip. That gap is
+exactly what its 0.945 precision (not 1.0) on temperature reflects.
 
 ```bash
 .venv/bin/python -c "
