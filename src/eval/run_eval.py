@@ -37,7 +37,7 @@ def evaluate_run(run_dir: Path, window_seconds: int = WINDOW_SECONDS) -> list[di
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    y_pred = method.run(series, dt_seconds)
+                    y_pred = method.run(series, dt_seconds, channel_label)
             except Exception as e:  # noqa: BLE001 -- keep going on a single method/channel failure
                 rows.append(
                     {

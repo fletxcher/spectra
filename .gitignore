@@ -9,5 +9,10 @@ wheels/
 # virtual environments
 .venv
 
-# generated simulation output 
+# generated simulation output
 datasets/
+
+# scratch analysis output (eval/calibration/clustering runs)
+calib_*.json
+eval_results*.parquet
+cluster_*.parquet

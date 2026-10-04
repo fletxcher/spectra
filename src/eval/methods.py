@@ -4,9 +4,11 @@ grid. This module normalizes all of that into one interface -- a boolean
 Series aligned to the input index, True = steady -- so they can be scored
 uniformly against the ground-truth steady-window label.
 
-Parameter choices below are reasonable, dt-aware first-pass defaults (scaled
-to the 60s steady-window target and the data's actual sampling interval),
-not exhaustively tuned; see README for the evaluation writeup.
+The `_tuned` variants of ssd_cpd and cusum replace indsl's library defaults
+(which turned out to be badly mismatched to this data's units/timescale --
+see the evaluation writeup) with parameters calibrated via grid search
+against a held-out calibration slice (src/eval/calibrate.py), scored
+against noise-floor estimates rather than guessed.
 """
 
 from __future__ import annotations
@@ -46,24 +48,45 @@ def _far_from_events(flags: pd.Series, target_index: pd.DatetimeIndex, window_se
     return pd.Series(time_since >= window_seconds * 1e9, index=target_index)
 
 
+def _noise_std(series: pd.Series) -> float:
+    return float(series.diff().std() / np.sqrt(2))
+
+
 @dataclass(frozen=True)
 class Method:
     name: str
-    run: Callable[[pd.Series, float], pd.Series]  # (series, dt_seconds) -> bool Series, True=steady
+    run: Callable[[pd.Series, float, str], pd.Series]  # (series, dt_seconds, channel) -> bool Series, True=steady
 
 
-def _ssd_cpd(series: pd.Series, dt_seconds: float) -> pd.Series:
+def _ssd_cpd(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
     min_distance = max(int(round(60.0 / dt_seconds)), 2)
     out = indsl_detect.ssd_cpd(series, min_distance=min_distance, var_threshold=2.0, slope_threshold=-3.0)
     return _align(out, series.index) == 1
 
 
-def _ssid(series: pd.Series, dt_seconds: float) -> pd.Series:
+# Calibrated via grid search (src/eval/calibrate.py) against a held-out
+# calibration slice, distinct from the evaluation run set.
+SSD_CPD_TUNED_PARAMS = {
+    "temperature": dict(var_threshold=5.0, slope_threshold=-5.0),
+    "pressure": dict(var_threshold=5.0, slope_threshold=-4.0),
+    "mass_flow": dict(var_threshold=10.0, slope_threshold=-6.0),
+    "phi": dict(var_threshold=500.0, slope_threshold=-6.0),
+}
+
+
+def _ssd_cpd_tuned(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
+    min_distance = max(int(round(60.0 / dt_seconds)), 2)
+    params = SSD_CPD_TUNED_PARAMS.get(channel, dict(var_threshold=5.0, slope_threshold=-5.0))
+    out = indsl_detect.ssd_cpd(series, min_distance=min_distance, **params)
+    return _align(out, series.index) == 1
+
+
+def _ssid(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
     out = indsl_detect.ssid(series, ratio_lim=2.5, alpha1=0.2, alpha2=0.1, alpha3=0.1)
     return _align(out, series.index) == 0  # docs: steady=0, transient=1
 
 
-def _vma(series: pd.Series, dt_seconds: float) -> pd.Series:
+def _vma(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
     window_length = max(int(round(60.0 / dt_seconds)), 2)
     vma_out = _align(indsl_detect.vma(series, window_length=window_length), series.index)
     diff = vma_out.diff().abs()
@@ -71,41 +94,62 @@ def _vma(series: pd.Series, dt_seconds: float) -> pd.Series:
     return diff.fillna(0) < eps
 
 
-def _unchanged(series: pd.Series, dt_seconds: float) -> pd.Series:
+def _unchanged(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
     out = indsl_detect.unchanged_signal_detector(series, duration=pd.Timedelta(seconds=60), min_nr_data_points=3)
     return _align(out, series.index) == 1
 
 
-def _cpd_ed_pelt(series: pd.Series, dt_seconds: float) -> pd.Series:
+def _cpd_ed_pelt(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
     min_distance = max(int(round(60.0 / dt_seconds)), 2)
     cp = _align(indsl_detect.cpd_ed_pelt(series, min_distance=min_distance), series.index)
     return _far_from_events(cp, series.index, window_seconds=60.0)
 
 
-def _cusum(series: pd.Series, dt_seconds: float) -> pd.Series:
+def _cusum(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
     out = _align(indsl_detect.cusum(series, return_series_type="cusum_binary_result"), series.index)
     return out == 0
 
 
-def _drift(series: pd.Series, dt_seconds: float) -> pd.Series:
+# Calibrated via grid search: k_drift=4.0, k_thresh=12.0, applied relative
+# to a per-series noise-floor estimate (replaces indsl's default drift
+# formula, which goes deeply negative -- and thus fires constantly -- on
+# absolute-scale signals like Kelvin or Pascal).
+CUSUM_K_DRIFT = 4.0
+CUSUM_K_THRESH = 12.0
+
+
+def _cusum_tuned(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
+    noise_std = _noise_std(series)
+    drift = CUSUM_K_DRIFT * noise_std
+    threshold = CUSUM_K_THRESH * noise_std
+    out = _align(
+        indsl_detect.cusum(series, threshold=threshold, drift=drift, return_series_type="cusum_binary_result"),
+        series.index,
+    )
+    return out == 0
+
+
+def _drift(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
     out = indsl_detect.drift(
         series, long_interval=pd.Timedelta(hours=2), short_interval=pd.Timedelta(minutes=15), std_threshold=3, detect="both"
     )
     return _align(out, series.index) == 0
 
 
-def _oscillation(series: pd.Series, dt_seconds: float) -> pd.Series:
+def _oscillation(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
     out = indsl_detect.oscillation_detector(series, order=4, threshold=0.2)
     return _align(out, series.index) == 0
 
 
 METHODS: list[Method] = [
     Method("ssd_cpd", _ssd_cpd),
+    Method("ssd_cpd_tuned", _ssd_cpd_tuned),
     Method("ssid", _ssid),
     Method("vma", _vma),
     Method("unchanged_signal_detector", _unchanged),
     Method("cpd_ed_pelt", _cpd_ed_pelt),
     Method("cusum", _cusum),
+    Method("cusum_tuned", _cusum_tuned),
     Method("drift", _drift),
     Method("oscillation_detector", _oscillation),
 ]

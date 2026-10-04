@@ -41,6 +41,109 @@ Output: one directory per run, `datasets/<run_id>/`, containing:
 - `emissions.png` — NOx and CO (converted from tracked species mass
   fractions to molar ppm) over the full 30-day run
 
+## Phase 2: steady-window detection (indsl)
+
+Goal: reliably detect a continuous **>=60-second steady window** in the
+noisy "observed" trace. Ground truth for this is derived from the
+simulator's per-sample `is_steady` label via a rolling 60s AND (`src/eval/labels.py`):
+a point only counts as a valid steady window if every sample in the
+preceding 60 seconds was also steady, not just the point itself.
+
+All 8 univariate detectors in [indsl.detect](https://indsl.docs.cognite.com/detect.html)
+were run against 4 channels (chamber temperature, pressure, air mass flow,
+phi) across a 40-run held-out sample (`src/eval/methods.py`, `run_eval.py`):
+
+- **4 of 8 were uninformative out of the box**: `drift` and
+  `oscillation_detector` predicted "steady" 100% of the time (never fired),
+  `cpd_ed_pelt` predicted "steady" 99.7% of the time, `cusum` predicted
+  "steady" 0% of the time (its default `drift` formula goes deeply negative
+  on absolute-scale signals like Kelvin/Pascal, so it fires constantly).
+  Their aggregate precision (~0.94-0.95) just matched the dataset's 94.5%
+  steady base rate — not genuine skill.
+- `ssid` looked good in a blended aggregate (F1=0.73) but that masked two
+  different degenerate failure modes across channels, not real
+  discrimination.
+- `unchanged_signal_detector` only works on the noise-free commanded `phi`
+  signal (precision 0.996) and is actively worse than random on real noisy
+  sensor channels (precision 0.000) — it assumes exact repeated values,
+  which essentially never happens with Gaussian sensor noise.
+- `ssd_cpd` and `cusum`, with **library defaults**, showed real but
+  channel-dependent signal (F1 0.13-0.94), tanked by two implementation
+  quirks: `ssd_cpd`'s variance term divides by *segment length* rather than
+  noise level, and `cusum`'s default drift formula assumes near-zero-mean
+  data.
+
+**Tuning pass** (`src/eval/calibrate.py`): grid search against a held-out
+5-run calibration slice (distinct from the 40-run eval set), scored against
+a diff-based noise-floor estimate rather than guessed:
+
+| Method | F1 before | F1 after tuning |
+|---|---|---|
+| `ssd_cpd` | 0.533 | **0.968** |
+| `cusum` | 0.000 | **0.947** |
+
+Both held up cleanly on the held-out evaluation set (not just the
+calibration data), consistently across all 4 channels and all 9 regions.
+**Conclusion: classical detection, properly tuned to the data's actual
+scale/noise/timescale, solves the stated task well (`ssd_cpd_tuned`
+F1~=0.97, near-instant detection) — no case found yet for reaching for ML
+on this task.**
+
+```bash
+.venv/bin/python -c "
+from src.eval.run_eval import evaluate_sweep
+df = evaluate_sweep('datasets', run_ids=[f'run_{i:05d}' for i in range(0, 200, 5)], workers=3)
+df.to_parquet('eval_results.parquet', index=False)
+"
+```
+
+## Phase 3: automatic grouping of steady points
+
+Goal: given the extracted steady windows, automatically group similar
+operating points into named regimes.
+
+- **Extraction** (`src/cluster/extract.py`): each contiguous dispatch
+  segment the simulator marks steady (>=60s) becomes one steady point,
+  summarized by its mean temperature, pressure, air/fuel mass flow, phi,
+  load_fraction, NOx, and CO over that dwell (~180 points/run, 36,000 total
+  across 200 runs).
+- **Clustering** (`src/cluster/cluster.py`): HDBSCAN (picks cluster count
+  automatically, flags ambiguous points as noise rather than forcing them
+  into a cluster) cross-checked against KMeans with *k* chosen by
+  silhouette score, run independently per engine/run.
+- **Naming** (`src/cluster/naming.py`): clusters are ranked by mean
+  `load_fraction` and mapped onto an ordered vocabulary (Minimum / Low /
+  Below-Average / Mid / Above-Average / High / Near-Peak / Peak Load), so
+  names stay consistent whether a run resolves into 2 or 8 regimes.
+
+**Findings**: clustering automatically rediscovers physically meaningful
+load regimes per engine (e.g. Low/Mid/Peak Load bands with distinct
+NOx/CO signatures) purely from steady-state data. Cluster count tracks each
+region's demand shape exactly as designed in Phase 1: single-peak regions
+(India, Middle East) consistently resolve to **2 clean clusters**
+(silhouette ~=0.72); double-peak regions (China, Europe, United States) need
+**3-3.4 clusters** (silhouette ~=0.60).
+
+**Caveat**: within a single run, engine design is fixed and phi / load /
+temperature / pressure / mass flow are all deterministic functions of one
+demand signal, so they're nearly perfectly collinear (correlation
+~=0.99-1.00, confirmed empirically). This clustering is therefore mostly
+finding good breakpoints along a 1-D ordered continuum (auto-selecting
+sensible regime boundaries/counts), not discovering independent
+multi-dimensional structure — still useful, but worth knowing. Clustering
+*across* runs (different engines/regions/fuel blends) would expose richer,
+genuinely multi-dimensional structure; this project clusters within a run
+by design choice.
+
+```bash
+.venv/bin/python -c "
+from src.cluster.run_cluster import cluster_sweep
+summary, points = cluster_sweep('datasets')
+summary.to_parquet('cluster_summary.parquet', index=False)
+points.to_parquet('cluster_points.parquet', index=False)
+"
+```
+
 ## Modeling assumptions
 
 This is a simplified engineering model built for generating realistic
@@ -128,3 +231,8 @@ Combustion chemistry:
 
 - [Cantera](https://cantera.org)
 - [G. P. Smith et al., GRI-Mech 3.0](http://www.me.berkeley.edu/gri_mech/)
+
+Detection and clustering:
+
+- [indsl.detect](https://indsl.docs.cognite.com/detect.html)
+- [scikit-learn](https://scikit-learn.org)
