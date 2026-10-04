@@ -186,6 +186,11 @@ region's demand shape exactly as designed in Phase 1: single-peak regions
 | Off-Peak / Low Load | 90 | 1949 | 0.74 | 0.58 | 20.6 | 560 |
 | Peak / High Load | 90 | 2136 | 0.92 | 0.70 | 108.9 | 888 |
 
+![Middle East example grouping](samples/middle_east/clustering_example.png)
+
+The single-peak region needs only 2 groups to cleanly separate its steady
+points, matching its single-peak diurnal shape.
+
 **run_00000 (United States, k=3, silhouette=0.63)**
 
 | Group | Points | Temp [K] | Load Fraction | Phi | NOx [ppm] | CO [ppm] |
@@ -193,6 +198,11 @@ region's demand shape exactly as designed in Phase 1: single-peak regions
 | Low Load | 68 | 1826 | 0.77 | 0.55 | 8.6 | 432 |
 | Mid Load | 80 | 1950 | 0.87 | 0.62 | 27.2 | 485 |
 | Peak / High Load | 32 | 2049 | 0.96 | 0.68 | 71.3 | 632 |
+
+![United States example grouping](samples/united_states/clustering_example.png)
+
+The double-peak region needs 3 groups, one more than the single-peak
+Middle East run above.
 
 **run_00006 (Europe, HDBSCAN, 6 regimes, silhouette=0.38)**
 
@@ -206,14 +216,13 @@ region's demand shape exactly as designed in Phase 1: single-peak regions
 | Near-Peak Load | 21 | 2025 | 0.90 | 0.64 | 61.7 | 278 |
 | Peak Load | 12 | 2057 | 0.93 | 0.66 | 87.7 | 309 |
 
-![Example groupings](samples/clustering_example.png)
+![Europe example grouping](samples/europe/clustering_example.png)
 
-The single-peak region needs only 2 groups to cleanly separate its steady
-points; the double-peak United States region needs 3; Europe's run here
-resolves to 6 via HDBSCAN, with 28 points flagged as "Unclassified /
-Transitional" rather than forced into a regime they don't cleanly belong
-to. More regimes generally emerge from runs with larger or noisier demand
-swings, where the continuum of load levels splits into finer bands.
+This run resolves to 6 regimes via HDBSCAN, with 28 points flagged as
+"Unclassified / Transitional" rather than forced into a regime they don't
+cleanly belong to. More regimes generally emerge from runs with larger or
+noisier demand swings, where the continuum of load levels splits into
+finer bands.
 
 **Caveat**: within a single run, engine design is fixed and phi / load /
 temperature / pressure / mass flow are all deterministic functions of one
