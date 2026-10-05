@@ -2,15 +2,18 @@
 turbine following grid electricity demand in a particular world region. The
 dispatched setpoint (equivalence ratio / load) tracks a demand signal built
 from that region's seasonal + diurnal + weekday/weekend pattern, re-dispatched
-every few hours like a real economic-dispatch schedule, with realistic
-loading/unloading ramps between levels. Ambient temperature is driven by the
-same region's diurnal/seasonal climate. Engine design parameters (pressure
-ratio, reference mass flow, combustor volume, fuel blend, site elevation) are
-Latin-hypercube sampled across runs."""
+at irregular intervals (frequent through the morning/evening ramps, sparse
+otherwise, with occasional short real-time corrections), with ramp-rate-limited
+transitions between levels. Unplanned disturbances (runbacks, fuel shifts,
+combustion-dynamics bursts) are injected into holds. Ambient temperature is
+driven by the same region's diurnal/seasonal climate. Engine design
+parameters (pressure ratio, reference mass flow, combustor volume, fuel blend,
+site elevation) are Latin-hypercube sampled across runs."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.stats import qmc
@@ -18,13 +21,12 @@ from scipy.stats import qmc
 from src.sim import demand
 from src.sim.conditions import AmbientConditions
 from src.sim.fuel import FuelBlend
-from src.sim.profiles import Profile, Segment, Setpoint
+from src.sim.profiles import Disturbance, Profile, Segment, Setpoint
 from src.sim.regions import REGIONS
 from src.sim.runner import SimCase
 
 TOTAL_DAYS = 30
-DISPATCH_INTERVAL_S = 4 * 3600.0  # re-dispatch every 4 hours, like day-ahead scheduling
-N_SEGMENTS = int(TOTAL_DAYS * 86400 / DISPATCH_INTERVAL_S)
+RAMP_HOURS = ((6.0, 10.0), (16.0, 21.0))  # local hours when demand moves fastest
 
 
 @dataclass(frozen=True)
@@ -55,17 +57,117 @@ class SweepBounds:
 
 
 @dataclass(frozen=True)
-class RampBounds:
-    ramp_duration_s: tuple[float, float] = (300.0, 1200.0)  # 5-20 min, per load change
+class DispatchBounds:
+    ramp_hour_interval_s: tuple[float, float] = (15 * 60.0, 60 * 60.0)
+    off_hour_interval_s: tuple[float, float] = (60 * 60.0, 4 * 3600.0)
+    correction_prob: float = 0.08  # chance a given interval is a short real-time correction
+    correction_interval_s: tuple[float, float] = (2 * 60.0, 10 * 60.0)
+    ramp_rate_per_min: tuple[float, float] = (0.02, 0.06)  # fraction of full load per minute, per run
+    min_ramp_s: float = 60.0
+    max_ramp_frac: float = 0.8  # a ramp may use at most this fraction of its interval
     demand_floor: float = 0.2  # minimum normalized demand (plant stays committed, not shut down)
 
 
+@dataclass(frozen=True)
+class AgcBounds:
+    """Per-run AGC regulation wander. sigma is the stationary std of the
+    load_fraction offset; a wide range so some units barely regulate and
+    others regulate hard."""
+
+    sigma: tuple[float, float] = (0.002, 0.015)
+    tau_s: tuple[float, float] = (60.0, 300.0)
+    steady_tolerance: float = 0.005  # +/- load_fraction band that still counts as steady
+
+
+@dataclass(frozen=True)
+class DisturbanceBounds:
+    rate_per_day: tuple[float, float] = (1.0, 3.0)  # sampled once per run
+    kind_weights: tuple[tuple[str, float], ...] = (("runback", 0.3), ("fuel_shift", 0.35), ("dynamics", 0.35))
+    lead_s: float = 120.0  # minimum settled time before an event starts
+    trail_s: float = 60.0  # minimum settled time after an event's settle buffer
+
+
+def _dispatch_intervals(rng: np.random.Generator, db: DispatchBounds) -> tuple[np.ndarray, np.ndarray]:
+    total = TOTAL_DAYS * 86400.0
+    starts, durations = [], []
+    t = 0.0
+    while t < total:
+        hour = (t / 3600.0) % 24.0
+        if rng.random() < db.correction_prob:
+            lo, hi = db.correction_interval_s
+        elif any(a <= hour < b for a, b in RAMP_HOURS):
+            lo, hi = db.ramp_hour_interval_s
+        else:
+            lo, hi = db.off_hour_interval_s
+        d = rng.uniform(lo, hi)
+        if total - (t + d) < db.correction_interval_s[0]:
+            d = total - t  # absorb a sliver at the end instead of leaving a tiny last segment
+        starts.append(t)
+        durations.append(d)
+        t += d
+    return np.array(starts), np.array(durations)
+
+
+def _sample_disturbance(kind: str, rng: np.random.Generator) -> Disturbance:
+    if kind == "runback":
+        load_delta = -rng.uniform(0.15, 0.35)
+        return Disturbance(
+            kind="runback", start=0.0,
+            ramp_in=rng.uniform(30.0, 90.0), hold=rng.uniform(120.0, 600.0), ramp_out=rng.uniform(180.0, 600.0),
+            load_delta=load_delta, phi_delta=0.5 * load_delta,
+        )
+    if kind == "fuel_shift":
+        return Disturbance(
+            kind="fuel_shift", start=0.0,
+            ramp_in=rng.uniform(60.0, 300.0), hold=rng.uniform(1200.0, 5400.0), ramp_out=rng.uniform(60.0, 300.0),
+            phi_delta=rng.choice([-1.0, 1.0]) * rng.uniform(0.03, 0.08),
+        )
+    return Disturbance(
+        kind="dynamics", start=0.0,
+        ramp_in=rng.uniform(30.0, 60.0), hold=rng.uniform(120.0, 480.0), ramp_out=rng.uniform(60.0, 120.0),
+        osc_amplitude=rng.uniform(0.02, 0.05), osc_period=rng.uniform(60.0, 240.0),
+    )
+
+
+def _place_disturbances(
+    segments: list[Segment], starts: np.ndarray, rng: np.random.Generator, dist: DisturbanceBounds
+) -> tuple[Disturbance, ...]:
+    """At most one event per segment, Poisson-thinned by hold length, placed
+    so it starts and ends inside that segment's settled hold."""
+    rate = rng.uniform(*dist.rate_per_day)
+    kinds = [k for k, _ in dist.kind_weights]
+    weights = np.array([w for _, w in dist.kind_weights])
+    weights = weights / weights.sum()
+
+    events = []
+    for seg, seg_start in zip(segments, starts):
+        hold_start = seg_start + seg.settle_time
+        seg_end = seg_start + seg.duration
+        if rng.random() >= 1.0 - math.exp(-rate * (seg_end - hold_start) / 86400.0):
+            continue
+        d = _sample_disturbance(str(rng.choice(kinds, p=weights)), rng)
+        earliest = hold_start + dist.lead_s
+        latest = seg_end - (d.end - d.start) - d.settle_buffer - dist.trail_s
+        if latest <= earliest:
+            continue
+        events.append(replace(d, start=float(rng.uniform(earliest, latest))))
+    return tuple(events)
+
+
 def _build_dispatch_schedule(
-    region_key: str, start_day_of_year: float, rng: np.random.Generator, bounds: SweepBounds, ramp_bounds: RampBounds
-) -> tuple[Profile, tuple[float, ...]]:
+    region_key: str,
+    start_day_of_year: float,
+    rng: np.random.Generator,
+    bounds: SweepBounds,
+    dispatch_bounds: DispatchBounds,
+    disturbance_bounds: DisturbanceBounds,
+    agc_bounds: AgcBounds,
+):
     region = REGIONS[region_key]
 
-    segment_mid_s = (np.arange(N_SEGMENTS) + 0.5) * DISPATCH_INTERVAL_S
+    seg_starts, seg_durations = _dispatch_intervals(rng, dispatch_bounds)
+    n = len(seg_starts)
+    segment_mid_s = seg_starts + seg_durations / 2.0
     hour_of_day = (segment_mid_s / 3600.0) % 24.0
     day_index = np.floor(segment_mid_s / 86400.0)
     # Seasonal baseline is fixed at the run's start date, not left to advance
@@ -73,39 +175,52 @@ def _build_dispatch_schedule(
     # meaningfully shift over 30 days -- that's a year-timescale effect, not
     # a within-month one. Only the diurnal (hour_of_day) and weekday/weekend
     # (day_index) components should evolve across the 30 days.
-    season_day_of_year = np.full(N_SEGMENTS, start_day_of_year)
+    season_day_of_year = np.full(n, start_day_of_year)
 
     raw = demand.raw_demand(region, season_day_of_year, hour_of_day, day_index, rng)
-    demand_norm = demand.normalize(raw, floor=ramp_bounds.demand_floor)
+    demand_norm = demand.normalize(raw, floor=dispatch_bounds.demand_floor)
     ambient_temp_k = demand.ambient_temperature_k(region, season_day_of_year, hour_of_day, rng)
 
     idle_phi = rng.uniform(*bounds.idle_phi)
     base_load_phi = rng.uniform(*bounds.base_load_phi)
     min_load_fraction = rng.uniform(*bounds.min_load_fraction)
+    ramp_rate_per_s = rng.uniform(*dispatch_bounds.ramp_rate_per_min) / 60.0
 
     phi = idle_phi + (base_load_phi - idle_phi) * demand_norm
     load_fraction = min_load_fraction + (1.0 - min_load_fraction) * demand_norm
 
     segments = []
-    for j in range(N_SEGMENTS):
+    for j in range(n):
         setpoint = Setpoint(phi=float(phi[j]), load_fraction=float(load_fraction[j]))
         if j == 0:
             segments.append(
-                Segment(setpoint=setpoint, hold_duration=DISPATCH_INTERVAL_S, transition_kind="step", settle_time=60.0)
+                Segment(setpoint=setpoint, hold_duration=float(seg_durations[0]), transition_kind="step", settle_time=60.0)
             )
-        else:
-            ramp_duration = rng.uniform(*ramp_bounds.ramp_duration_s)
-            segments.append(
-                Segment(
-                    setpoint=setpoint,
-                    hold_duration=DISPATCH_INTERVAL_S - ramp_duration,
-                    transition_kind="ramp",
-                    transition_duration=ramp_duration,
-                    settle_time=ramp_duration,
-                )
+            continue
+        ramp = max(dispatch_bounds.min_ramp_s, abs(load_fraction[j] - load_fraction[j - 1]) / ramp_rate_per_s)
+        ramp = min(ramp, dispatch_bounds.max_ramp_frac * seg_durations[j])
+        segments.append(
+            Segment(
+                setpoint=setpoint,
+                hold_duration=float(seg_durations[j] - ramp),
+                transition_kind="ramp",
+                transition_duration=float(ramp),
+                settle_time=float(ramp),
             )
+        )
 
-    profile = Profile(initial=segments[0].setpoint, segments=tuple(segments))
+    disturbances = _place_disturbances(segments, seg_starts, rng, disturbance_bounds)
+    profile = Profile(
+        initial=segments[0].setpoint,
+        segments=tuple(segments),
+        disturbances=disturbances,
+        agc_sigma=float(rng.uniform(*agc_bounds.sigma)),
+        agc_tau=float(rng.uniform(*agc_bounds.tau_s)),
+        # phi moves with load along the same mapping dispatch uses
+        agc_phi_per_load=float((base_load_phi - idle_phi) / (1.0 - min_load_fraction)),
+        agc_seed=int(rng.integers(2**32)),
+        steady_tolerance=agc_bounds.steady_tolerance,
+    )
     return profile, tuple(float(t) for t in ambient_temp_k), idle_phi, base_load_phi, min_load_fraction
 
 
@@ -113,14 +228,17 @@ def sample_sweep(
     n_cases: int,
     seed: int = 0,
     bounds: SweepBounds = SweepBounds(),
-    ramp_bounds: RampBounds = RampBounds(),
+    dispatch_bounds: DispatchBounds = DispatchBounds(),
+    disturbance_bounds: DisturbanceBounds = DisturbanceBounds(),
+    agc_bounds: AgcBounds = AgcBounds(),
     fine_dt: float = 30.0,
     coarse_dt: float = 300.0,
     fine_window: float = 300.0,
 ) -> list[SimCase]:
     """Latin-hypercube sample over continuous engine/site params; each case
-    is independently assigned a region (cycled for even coverage) and a
-    randomly timed 30-day dispatch schedule following that region's demand."""
+    is independently assigned a region (cycled for even coverage), a
+    randomly timed 30-day dispatch schedule following that region's demand,
+    and a set of disturbances."""
     sampler = qmc.LatinHypercube(d=5, seed=seed)
     unit_samples = sampler.random(n=n_cases)
     scaled = qmc.scale(unit_samples, bounds.as_array()[:, 0], bounds.as_array()[:, 1])
@@ -134,7 +252,7 @@ def sample_sweep(
         start_day_of_year = rng.uniform(0.0, 365.0)
 
         profile, segment_ambient_temp_k, idle_phi, base_load_phi, min_load_fraction = _build_dispatch_schedule(
-            region_key, start_day_of_year, rng, bounds, ramp_bounds
+            region_key, start_day_of_year, rng, bounds, dispatch_bounds, disturbance_bounds, agc_bounds
         )
 
         cases.append(

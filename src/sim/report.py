@@ -31,8 +31,12 @@ def write_conditions_txt(result: RunResult, path: str | Path) -> None:
     case = result.case
     net = result.network
     region = REGIONS[case.region_name]
-    n_segments = len(case.profile.segments)
-    total_days = case.profile.total_duration / 86400.0
+    profile = case.profile
+    n_segments = len(profile.segments)
+    total_days = profile.total_duration / 86400.0
+    intervals_min = np.array([seg.duration for seg in profile.segments]) / 60.0
+    ramps_min = np.array([seg.transition_duration for seg in profile.segments[1:]]) / 60.0
+    kinds = [d.kind for d in profile.disturbances]
 
     lines = [
         f"run_id: {case.run_id}",
@@ -63,30 +67,42 @@ def write_conditions_txt(result: RunResult, path: str | Path) -> None:
         f"idle (minimum-turndown) phi: {case.idle_phi:.3f}",
         f"base-load phi: {case.base_load_phi:.3f}",
         f"minimum load fraction (turndown limit): {case.min_load_fraction:.3f}",
-        f"dispatch re-evaluated every: {case.profile.segments[0].duration / 3600:.1f} h "
-        f"({n_segments} dispatch intervals over {total_days:.0f} days)",
-        "load/phi tracks regional grid demand (seasonal + diurnal + weekday/weekend), "
-        "ramped between levels over a few minutes to tens of minutes per change (no overshoot).",
+        f"dispatch intervals: {n_segments} over {total_days:.0f} days, "
+        f"length min / median / max = {intervals_min.min():.1f} / {np.median(intervals_min):.1f} / "
+        f"{intervals_min.max():.1f} min",
+        f"ramp duration min / median / max = {ramps_min.min():.1f} / {np.median(ramps_min):.1f} / "
+        f"{ramps_min.max():.1f} min (ramp-rate limited, no overshoot)",
+        "load/phi tracks regional grid demand (seasonal + diurnal + weekday/weekend); re-dispatched "
+        "frequently through the morning/evening ramps, sparsely otherwise, with occasional short "
+        "real-time corrections.",
+        "",
+        "-- AGC (regulation wander) --",
+        f"load offset std: {profile.agc_sigma * 100:.2f}% of full load, correlation time: {profile.agc_tau:.0f} s",
+        f"steady tolerance: +/-{profile.steady_tolerance * 100:.2f}% of full load",
+        "",
+        "-- disturbances --",
+        f"total: {len(kinds)} (runback: {kinds.count('runback')}, fuel_shift: {kinds.count('fuel_shift')}, "
+        f"dynamics: {kinds.count('dynamics')})",
         "",
         "-- operating conditions swept over the 30-day period (daily min / mean / max) --",
         f"{'date':<12}{'ambient T [C]':<22}{'load_fraction':<22}{'phi':<22}{'adiabatic T [K]':<22}",
     ]
 
-    segments_per_day = max(n_segments // 30, 1)
+    seg_day = np.floor(np.array(profile.segment_starts) / 86400.0).astype(int)
     ambient_c = np.array(case.segment_ambient_temp_k) - 273.15
-    load_fraction = np.array([seg.setpoint.load_fraction for seg in case.profile.segments])
-    phi = np.array([seg.setpoint.phi for seg in case.profile.segments])
+    load_fraction = np.array([seg.setpoint.load_fraction for seg in profile.segments])
+    phi = np.array([seg.setpoint.phi for seg in profile.segments])
     adiabatic_t = np.array([result.segment_adiabatic_temp[i] for i in range(n_segments)])
 
     def fmt_range(arr: np.ndarray) -> str:
         return f"{arr.min():.1f} / {arr.mean():.1f} / {arr.max():.1f}"
 
-    for day in range(n_segments // segments_per_day):
-        sl = slice(day * segments_per_day, (day + 1) * segments_per_day)
+    for day in np.unique(seg_day):
+        mask = seg_day == day
         date = _date_str(case.start_day_of_year + day)
         lines.append(
-            f"{date:<12}{fmt_range(ambient_c[sl]):<22}{fmt_range(load_fraction[sl]):<22}"
-            f"{fmt_range(phi[sl]):<22}{fmt_range(adiabatic_t[sl]):<22}"
+            f"{date:<12}{fmt_range(ambient_c[mask]):<22}{fmt_range(load_fraction[mask]):<22}"
+            f"{fmt_range(phi[mask]):<22}{fmt_range(adiabatic_t[mask]):<22}"
         )
 
     Path(path).write_text("\n".join(lines) + "\n")

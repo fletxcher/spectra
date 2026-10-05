@@ -1,7 +1,7 @@
 """Builds the 0-D Cantera reactor network representing the combustion
 chamber: air + fuel reservoirs feeding a well-stirred combustor through
-time-varying mass-flow controllers, exhausting through a pressure controller
-that holds chamber pressure near its target."""
+mass-flow controllers (set per sample via `set_inputs`), exhausting through a
+pressure controller that holds chamber pressure near its target."""
 
 from __future__ import annotations
 
@@ -74,17 +74,8 @@ def build_combustor_network(
     exhaust_gas.TPX = combustor_gas.T, exhaust_pressure, combustor_gas.X
     exhaust_reservoir = ct.Reservoir(exhaust_gas, name="exhaust")
 
-    def air_mdot(t: float) -> float:
-        return profile.load_fraction(t) * mdot_air_ref
-
-    def fuel_mdot(t: float) -> float:
-        return air_mdot(t) * profile.phi(t) / afr
-
     air_mfc = ct.MassFlowController(air_reservoir, combustor, name="air_mfc")
-    air_mfc.mass_flow_rate = air_mdot
-
     fuel_mfc = ct.MassFlowController(fuel_reservoir, combustor, name="fuel_mfc")
-    fuel_mfc.mass_flow_rate = fuel_mdot
 
     mdot_fuel_ref = mdot_air_ref * profile.initial.phi / afr
     kv = (mdot_air_ref + mdot_fuel_ref) / (chamber_pressure - exhaust_pressure)
@@ -94,7 +85,7 @@ def build_combustor_network(
 
     net = ct.ReactorNet([combustor])
 
-    return CombustorNetwork(
+    network = CombustorNetwork(
         net=net,
         combustor=combustor,
         air_gas=air_gas,
@@ -109,6 +100,17 @@ def build_combustor_network(
         discharge_pressure=discharge.pressure,
         initial_density=combustor_gas.density,
     )
+    set_inputs(network, profile.initial.load_fraction, profile.initial.phi)
+    return network
+
+
+def set_inputs(network: CombustorNetwork, load_fraction: float, phi: float) -> None:
+    """Holds air/fuel mass flow constant at the given setpoint until the next
+    call. The run is integrated quasi-steadily (see runner.run_case), so the
+    flow controllers take plain constants rather than time callbacks."""
+    mdot_air = load_fraction * network.mdot_air_ref
+    network.air_mfc.mass_flow_rate = mdot_air
+    network.fuel_mfc.mass_flow_rate = mdot_air * phi / network.stoich_afr
 
 
 def update_discharge_temperature(
