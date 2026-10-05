@@ -10,31 +10,58 @@ operating points from transient data and automatically grouping them.
 Before evaluating any extraction/clustering technique, we need labeled
 transient-to-steady time-series data. `spectra` simulates a large gas
 turbine's combustion chamber as a 0-D Cantera reactor network (GRI-Mech 3.0
-chemistry, CH4/H2 fuel blends) over a **30-day period**, with the dispatched
-setpoint (equivalence ratio / load) tracking realistic grid electricity
-demand for one of 9 world regions (United States, Canada, Central America,
-South America, Europe, Middle East, Russia, China, India); demand is
-re-evaluated every 4 hours from that region's seasonal + diurnal +
-weekday/weekend pattern, with realistic ramps (minutes, no overshoot) between
-levels. Ambient temperature follows the same region's diurnal/seasonal
-climate. Engine design parameters (pressure ratio, reference mass flow,
-combustor volume, fuel blend, site elevation) are Latin-hypercube sampled
-across runs.
+chemistry, CH4/H2 fuel blends) over a **30-day period** at 15 s resolution,
+following realistic grid electricity demand for one of 9 world regions
+(United States, Canada, Central America, South America, Europe, Middle East,
+Russia, China, India). On top of the demand-following dispatch, each run
+carries the things that keep a real plant from ever sitting perfectly still:
+
+- **Irregular dispatch**: the load target is re-dispatched every 15-60 min
+  through the morning/evening demand ramps, every 1-4 h otherwise, with an
+  8% chance of a 2-10 min real-time correction. That's ~580 setpoint
+  changes per run, each ramped at a per-run rate of 2-6% of full load per
+  minute with no overshoot.
+- **Disturbances** (1-3 per day): *runbacks* (a fast 15-35% load cut, a
+  short hold, then recovery), *fuel shifts* (a fuel heating-value drift
+  that settles phi at a new level for 20-90 min), and *combustion dynamics*
+  (a few minutes of phi oscillation, roughly the size of the sensor noise).
+- **AGC wander**: continuous automatic-generation-control corrections, an
+  Ornstein-Uhlenbeck process on load with a per-run amplitude (0.2-1.5% of
+  full load) and correlation time (1-5 min). Some units barely regulate;
+  others regulate hard.
+
+Ambient temperature follows the region's diurnal/seasonal climate. Engine
+design parameters (pressure ratio, reference mass flow, combustor volume,
+fuel blend, site elevation) are Latin-hypercube sampled across runs.
+
+**Ground truth.** A sample is labeled steady when the dispatch ramp has
+finished, no disturbance transient is in progress, and the commanded
+operating point has stayed inside a +/-0.5%-of-full-load band (and the
+equivalent phi band) over the trailing 60 s. Stability is judged on the
+signal's own recent history, so a detector can in principle recover it: on
+the noise-free commanded signal, a signal-only check reproduces the labels
+at MCC 0.87-0.99. Across the 200 runs the steady fraction ranges from 37%
+(units regulating hard) to 98%, median 89%.
 
 Each run is written with both the ground truth and a noisy "observed" trace,
-plus per-timestep `segment_id` / `is_steady` labels to score extraction
-methods against.
+plus per-timestep `segment_id` / `is_steady` / `disturbance` labels to score
+extraction methods against.
 
 ```bash
-uv run spectra sweep --n-cases 200 --out datasets --workers 8
+uv run spectra sweep --n-cases 200 --out datasets --workers 3 --fine-dt 15 --coarse-dt 15 --fine-window 0
 ```
+
+Each run takes ~100 s and peaks at ~800 MB, so keep `--workers` within your
+memory budget. Labels can be recomputed in place without re-running the
+physics: `.venv/bin/python scripts/relabel_steady.py`.
 
 Output: one directory per run, `datasets/<run_id>/`, containing:
 
 - `data.parquet`: the time series (truth + noisy observed columns, plus
-  per-timestep `segment_id` / `is_steady` ground truth)
+  per-timestep `segment_id` / `is_steady` / `disturbance` ground truth)
 - `conditions.txt`: region, simulated date range, site/engine parameters,
-  control-schedule setpoints, and a daily summary table of ambient
+  control-schedule setpoints, dispatch-interval and ramp statistics, AGC
+  parameters, disturbance counts, and a daily summary table of ambient
   temperature / load / phi / adiabatic flame temperature over the 30 days
 - `temperature.png`: chamber temperature (TIT proxy) vs. the equilibrium
   adiabatic flame temperature, over the full 30-day run
@@ -77,17 +104,18 @@ What actually differs between regions, physically:
 
 A full example run per region is included under `samples/<region>/`
 (`conditions.txt`, `temperature.png`, `emissions.png`; `data.parquet`
-omitted, ~10MB/run). Three contrasting examples:
+omitted, ~30MB/run). Three contrasting examples:
 
 **United States**: double-peak, summer-dominant, moderate swing
 ![United States temperature](samples/united_states/temperature.png)
 
-**Middle East**: single-peak (AC-driven), the most extreme seasonal/diurnal swing of any region
+**Middle East**: single-peak (AC-driven), one broad daily plateau and the
+largest peak:trough ratio in the table (1.9x)
 ![Middle East temperature](samples/middle_east/temperature.png)
 
-**Russia**: double-peak, with the flattest overnight troughs of any region
-(peak:trough 1.4x, lowest in the table), since winter heating demand
-persists through the night instead of dropping off like AC-driven load does
+**Russia**: double-peak, with the lowest peak:trough ratio in the table
+(1.4x), so a shallower daily swing than the AC-driven regions, since winter
+heating demand persists through the night
 ![Russia temperature](samples/russia/temperature.png)
 
 The remaining 6 regions (Canada, Central America, South America, Europe,
@@ -102,64 +130,99 @@ simulator's per-sample `is_steady` label via a rolling 60s AND (`src/eval/labels
 a point only counts as a valid steady window if every sample in the
 preceding 60 seconds was also steady.
 
-All 8 univariate detectors in [indsl.detect](https://indsl.docs.cognite.com/detect.html)
-were run against 4 channels (chamber temperature, pressure, air mass flow,
-phi) across a 40-run held-out sample (`src/eval/methods.py`, `run_eval.py`):
+All 8 univariate detectors in [indsl.detect](https://indsl.docs.cognite.com/detect.html),
+plus calibrated variants of `ssd_cpd` and `cusum` and an `always_steady`
+baseline, were run against 4 channels (chamber temperature, pressure, air
+mass flow, phi) across a 40-run held-out sample (`src/eval/methods.py`,
+`run_eval.py`). In this sample, 65.2% of samples are inside a true 60 s
+steady window.
 
-- **4 of 8 were uninformative out of the box**: `drift` and
-  `oscillation_detector` predicted "steady" 100% of the time (never fired),
-  `cpd_ed_pelt` predicted "steady" 99.7% of the time, `cusum` predicted
-  "steady" 0% of the time (its default `drift` formula goes deeply negative
-  on absolute-scale signals like Kelvin/Pascal, so it fires constantly).
-  Their aggregate precision (~0.94-0.95) just matched the dataset's 94.5%
-  steady base rate, which is not genuine skill.
-- `ssid` looked good in a blended aggregate (F1=0.73) but that masked two
-  different degenerate failure modes across channels, not real
-  discrimination.
-- `unchanged_signal_detector` only works on the noise-free commanded `phi`
-  signal (precision 0.996) and is actively worse than random on real noisy
-  sensor channels (precision 0.000); it assumes exact repeated values,
-  which essentially never happens with Gaussian sensor noise.
-- `ssd_cpd` and `cusum`, with **library defaults**, showed real but
-  channel-dependent signal (F1 0.13-0.94), tanked by two implementation
-  quirks: `ssd_cpd`'s variance term divides by *segment length* rather than
-  noise level, and `cusum`'s default drift formula assumes near-zero-mean
-  data.
+**Metric.** The headline metric is MCC (Matthews correlation coefficient):
+1 is perfect, 0 is no better than chance, and any constant predictor
+("always steady" or "never steady") scores exactly 0. F1 on the steady class
+can't be the headline. At a 65% base rate, `always_steady` scores F1 = 0.758
+without detecting anything, and an F1-tuned detector simply converges on
+that trivial answer.
 
-**Tuning pass** (`src/eval/calibrate.py`): grid search against a held-out
-5-run calibration slice (distinct from the 40-run eval set), scored against
-a diff-based noise-floor estimate rather than guessed:
+**Calibration** (`src/eval/calibrate.py`): `ssd_cpd` (per channel) and
+`cusum` (one global setting, scaled to each series' noise floor) were
+grid-searched by MCC on a held-out 5-run slice, distinct from the 40
+evaluation runs.
 
-| Method | F1 before | F1 after tuning |
-|---|---|---|
-| `ssd_cpd` | 0.533 | **0.968** |
-| `cusum` | 0.000 | **0.947** |
+**Results** (mean MCC over 40 runs):
 
-Both generalized cleanly: tuned on the 5-run calibration slice, then scored
-on the separate 40-run evaluation set, holding up consistently across all 4
-channels and all 9 regions.
-**Conclusion: classical detection, properly tuned to the data's actual
-scale/noise/timescale, solves the stated task well (`ssd_cpd_tuned`
-F1~=0.97, near-instant detection).**
+| Method | temperature | mass flow | phi | pressure | overall MCC | balanced acc. | F1 |
+|---|---|---|---|---|---|---|---|
+| `cpd_ed_pelt` | 0.115 | 0.140 | 0.162 | skipped | **0.139** | 0.522 | 0.760 |
+| `cusum_tuned` | **0.177** | **0.164** | 0.078 | 0.000 | 0.105 | **0.554** | 0.662 |
+| `ssid` | 0.094 | 0.164 | 0.071 | 0.000 | 0.082 | 0.523 | 0.628 |
+| `vma` | 0.047 | 0.095 | 0.117 | 0.000 | 0.065 | 0.544 | 0.495 |
+| `ssd_cpd_tuned` | 0.050 | 0.070 | 0.062 | skipped | 0.061 | 0.507 | 0.758 |
+| `ssd_cpd` (defaults) | 0.002 | 0.000 | 0.014 | skipped | 0.006 | 0.504 | 0.031 |
+| `unchanged_signal_detector` | 0.000 | 0.000 | 0.020 | 0.000 | 0.005 | 0.500 | 0.001 |
+| `cusum` (defaults) | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.000 |
+| `drift` | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.758 |
+| `oscillation_detector` | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.758 |
+| `always_steady` (baseline) | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.758 |
 
-`ssd_cpd` run on `run_00000`'s temperature channel, library defaults vs.
-tuned, against the ground-truth steady regions (shaded gray):
+**Findings:**
+
+- **No detector reliably detects steady windows on this data.** The best
+  mean MCC is 0.14 and no balanced accuracy exceeds 0.554. The best single
+  run/channel result is MCC 0.47 (`cusum_tuned`). No method beats
+  `always_steady` on F1.
+- **The limit is sensor noise, not the labels.** A signal-only stability
+  check on the *noise-free* commanded signal recovers the ground truth at
+  MCC 0.87-0.99. On the observed channels, the +/-0.5% load band works out
+  to roughly 6 K of chamber temperature, under ~20 K of measurement noise.
+- **Several methods degenerate to a constant.** `drift` and
+  `oscillation_detector` never fire. `cusum` with library defaults always
+  fires (its default drift term goes deeply negative on absolute-scale
+  signals like Kelvin or Pascal). `ssd_cpd_tuned` and `cpd_ed_pelt` call
+  >99% of samples steady; their small positive MCC comes from the rare
+  samples they do flag being right.
+- **Pressure is uninformative for every method** (MCC ~0). Chamber pressure
+  is held near its target by the controller, so it carries little
+  operating-point information. `ssd_cpd`, `ssd_cpd_tuned` and `cpd_ed_pelt`
+  were skipped on pressure: on that noise-dominated signal ED-Pelt finds few
+  change points and hits its O(n^2) worst case (>10 min per call vs ~17 s on
+  temperature), with calibration MCC ~0.005 there anyway. Skipped pairs are
+  recorded as `error="skipped"` in the results.
+
+**Earlier result, superseded.** On the first, idealized dataset (fixed
+4-hour dispatch, perfectly flat holds, 94.5% steady), tuned `ssd_cpd` and
+`cusum` scored F1 0.968 and 0.947. Those numbers came from long flat
+plateaus that any detector could find, and from F1 rewarding near-constant
+"steady" predictions. They don't carry over to the realistic data.
+
+`ssd_cpd` on `run_00000`'s temperature channel, library defaults vs. tuned,
+against the ground-truth steady regions (shaded gray). An **interactive,
+zoomable version** is in
+[`samples/united_states/detection_before_after.html`](samples/united_states/detection_before_after.html)
+(download it and open it in a browser; GitHub shows `.html` files as source).
+Zoom into any few-minute stretch there to see the individual AGC excursions
+that the static plot below compresses into hairline gaps.
 
 ![ssd_cpd before and after tuning](samples/united_states/detection_before_after.png)
 
-The default (top) essentially never calls anything steady here, consistent
-with its poor aggregate F1 above. The tuned version (bottom) correctly
-rests at 1 (steady) for most of the window, matching the dataset's 94.5%
-steady base rate, but only drops to 0 for 2 of the 17 true transitions in
-this 3-day slice; the rest pass through without a detected dip. That gap is
-exactly what its 0.945 precision (not 1.0) on temperature reflects.
+The defaults (top) almost never call anything steady. The tuned version
+(bottom) calls almost everything steady. Neither tracks the thousands of
+short transient gaps in the ground truth.
 
 ```bash
+# calibration: one process per (method, channel), each writes calib_<method>_<channel>.json
+.venv/bin/python -m src.eval.calibrate ssd_cpd temperature
+.venv/bin/python -m src.eval.calibrate cusum temperature
+
+# 40-run evaluation (~85 min on 3 workers)
 .venv/bin/python -c "
 from src.eval.run_eval import evaluate_sweep
 df = evaluate_sweep('datasets', run_ids=[f'run_{i:05d}' for i in range(0, 200, 5)], workers=3)
 df.to_parquet('eval_results.parquet', index=False)
 "
+
+# regenerate everything under samples/ (grouping example runs as args)
+.venv/bin/python scripts/make_sample_figures.py run_00000 run_00077:hdbscan
 ```
 
 ## Phase 3: automatic grouping of steady points
@@ -167,11 +230,13 @@ df.to_parquet('eval_results.parquet', index=False)
 Goal: given the extracted steady windows, automatically group similar
 operating points into named regimes.
 
-- **Extraction** (`src/cluster/extract.py`): each contiguous dispatch
-  segment the simulator marks steady (>=60s) becomes one steady point,
-  summarized by its mean temperature, pressure, air/fuel mass flow, phi,
-  load_fraction, NOx, and CO over that dwell (~180 points/run, 36,000 total
-  across 200 runs).
+- **Extraction** (`src/cluster/extract.py`): each contiguous stretch the
+  ground truth marks steady for >=60 s becomes one steady point, summarized
+  by its mean temperature, pressure, air/fuel mass flow, phi, load_fraction,
+  NOx, and CO over that dwell. Stretches split on every transient, so one
+  dispatch segment can yield several points (before a fuel shift, on its
+  plateau, after it). AGC breaks holds into many short windows: ~6,000
+  points per run (median dwell 2-4 min), 1.05M total across 200 runs.
 - **Clustering** (`src/cluster/cluster.py`): HDBSCAN (picks cluster count
   automatically, flags ambiguous points as noise rather than forcing them
   into a cluster) cross-checked against KMeans with *k* chosen by
@@ -181,77 +246,60 @@ operating points into named regimes.
   Below-Average / Mid / Above-Average / High / Near-Peak / Peak Load), so
   names stay consistent whether a run resolves into 2 or 8 regimes.
 
-**Findings**: clustering automatically rediscovers physically meaningful
-load regimes per engine (e.g. Low/Mid/Peak Load bands with distinct
-NOx/CO signatures) purely from steady-state data. Cluster count tracks each
-region's demand shape exactly as designed in Phase 1: single-peak regions
-(India, Middle East) consistently resolve to **2 clean clusters**
-(silhouette ~=0.72); double-peak regions (China, Europe, United States) need
-**3-3.4 clusters** (silhouette ~=0.60).
+**Findings**:
+
+- **KMeans settles on k=2 for all 200 runs** (silhouette 0.53-0.67, median
+  0.61, with no regional difference): an off-peak band and a peak band. With AGC, the steady points
+  fill the load range almost continuously, and on a continuous 1-D spread
+  silhouette prefers a single split.
+- **HDBSCAN** finds 2 regimes in 149 runs, 3 in 35, and 4-7 in the other
+  16, flagging a median 22% of points (14-34%, p10-p90) as noise rather than
+  forcing them into a band.
+- **The v1 regional pattern did not survive.** On the earlier idealized
+  data (180 perfectly flat plateaus per run, sitting at a few discrete
+  demand levels), single-peak regions resolved to 2 clusters and
+  double-peak regions to 3. That separation came from how few, and how
+  clean, v1's plateaus were, not from region; on v2 every region looks the
+  same to KMeans.
+- **Disturbances add real off-axis structure.** Every steady point used to
+  sit on one load/temperature curve, since within a run everything was a
+  function of one demand signal. Fuel-shift and runback plateaus now sit
+  off that curve (same load, different phi and temperature), and HDBSCAN
+  correctly leaves them out of the load bands (example below).
 
 ### Example groupings
 
-The same groups, shown directly on the temperature trace they were
-extracted from (`run_00000`, United States, 3 regimes), rather than in the
-abstract load_fraction/temperature scatter space used below:
+The groups shown directly on the temperature trace they were extracted
+from (`run_00000`, United States):
 
 ![Groups on the actual time series](samples/united_states/clusters_on_timeseries.png)
 
-**run_00077 (Middle East, k=2, silhouette=0.71)**
+**run_00000 (United States, KMeans k=2, silhouette=0.61, 9,466 steady points)**
 
 | Group | Points | Temp [K] | Load Fraction | Phi | NOx [ppm] | CO [ppm] |
 |---|---|---|---|---|---|---|
-| Off-Peak / Low Load | 90 | 1949 | 0.74 | 0.58 | 20.6 | 560 |
-| Peak / High Load | 90 | 2136 | 0.92 | 0.70 | 108.9 | 888 |
-
-![Middle East example grouping](samples/middle_east/clustering_example.png)
-
-The single-peak region needs only 2 groups to cleanly separate its steady
-points, matching its single-peak diurnal shape.
-
-**run_00000 (United States, k=3, silhouette=0.63)**
-
-| Group | Points | Temp [K] | Load Fraction | Phi | NOx [ppm] | CO [ppm] |
-|---|---|---|---|---|---|---|
-| Low Load | 68 | 1826 | 0.77 | 0.55 | 8.6 | 432 |
-| Mid Load | 80 | 1950 | 0.87 | 0.62 | 27.2 | 485 |
-| Peak / High Load | 32 | 2049 | 0.96 | 0.68 | 71.3 | 632 |
+| Off-Peak / Low Load | 4082 | 1851 | 0.82 | 0.56 | 11.3 | 449 |
+| Peak / High Load | 5384 | 1998 | 0.92 | 0.65 | 45.2 | 546 |
 
 ![United States example grouping](samples/united_states/clustering_example.png)
 
-The double-peak region needs 3 groups, one more than the single-peak
-Middle East run above.
-
-**run_00006 (Europe, HDBSCAN, 6 regimes, silhouette=0.38)**
+**run_00077 (Middle East, HDBSCAN, 5 regimes, silhouette=0.20, 6,841 steady points)**
 
 | Group | Points | Temp [K] | Load Fraction | Phi | NOx [ppm] | CO [ppm] |
 |---|---|---|---|---|---|---|
-| Minimum Load | 9 | 1875 | 0.77 | 0.55 | 11.7 | 229 |
-| Low Load | 32 | 1908 | 0.80 | 0.57 | 16.9 | 231 |
-| Mid Load | 22 | 1944 | 0.83 | 0.59 | 25.1 | 237 |
-| Above-Average Load | 56 | 1992 | 0.87 | 0.62 | 43.2 | 257 |
-| Unclassified / Transitional | 28 | 2012 | 0.89 | 0.63 | 74.5 | 296 |
-| Near-Peak Load | 21 | 2025 | 0.90 | 0.64 | 61.7 | 278 |
-| Peak Load | 12 | 2057 | 0.93 | 0.66 | 87.7 | 309 |
+| Minimum Load | 1870 | 1942 | 0.77 | 0.58 | 17.8 | 563 |
+| Below-Average Load | 386 | 2028 | 0.82 | 0.63 | 38.3 | 623 |
+| Above-Average Load | 352 | 2077 | 0.85 | 0.66 | 61.0 | 697 |
+| Unclassified / Transitional | 1908 | 2133 | 0.88 | 0.70 | 174.7 | 1063 |
+| High Load | 1771 | 2164 | 0.90 | 0.71 | 141.9 | 953 |
+| Peak Load | 554 | 2237 | 0.95 | 0.76 | 267.0 | 1352 |
 
-![Europe example grouping](samples/europe/clustering_example.png)
+![Middle East example grouping](samples/middle_east/clustering_example.png)
 
-This run resolves to 6 regimes via HDBSCAN, with 28 points flagged as
-"Unclassified / Transitional" rather than forced into a regime they don't
-cleanly belong to. More regimes generally emerge from runs with larger or
-noisier demand swings, where the continuum of load levels splits into
-finer bands.
-
-**Caveat**: within a single run, engine design is fixed and phi / load /
-temperature / pressure / mass flow are all deterministic functions of one
-demand signal, so they're nearly perfectly collinear (correlation
-~=0.99-1.00, confirmed empirically). This clustering is therefore mostly
-finding good breakpoints along a 1-D ordered continuum, auto-selecting
-sensible regime boundaries/counts rather than discovering independent
-multi-dimensional structure. Clustering *across* runs (different
-engines/regions/fuel blends) would expose richer, genuinely
-multi-dimensional structure; this project clusters within a run by design
-choice.
+The off-curve points above and below the main line are fuel-shift and
+runback plateaus. HDBSCAN puts them in "Unclassified / Transitional"
+instead of assigning them to a load band they don't belong to, which is
+also why that group's mean NOx and CO sit above the bands either side of it.
 
 ```bash
 .venv/bin/python -c "
@@ -290,16 +338,39 @@ emissions prediction tool. Key simplifications:
   nozzle/backpressure conditions downstream.
 - Site/ambient pressure (elevation) is fixed per run; only ambient
   *temperature* varies over the 30 days.
+- The reactor is solved **quasi-steadily**: at each 15 s sample the inputs
+  are held fixed and the reactor network is solved directly for its steady
+  state (`ReactorNet.solve_steady`, seeded from the previous sample). The
+  combustor's residence time is 3-70 ms, roughly 1000x shorter than the
+  sample interval, so the chamber is always fully settled to its current
+  inputs at this resolution. This matches continuous time integration to
+  0.012 K (p99) and is ~19x faster, which is what makes 30 days of
+  continuously moving AGC forcing tractable (~100 s/run instead of ~24 min).
+  The trade-off is that dynamics faster than a few residence times are not
+  represented, which is fine for operating-point analysis at 15 s.
 
 **Dispatch / control schedule**
 - Equivalence ratio and load both scale linearly with a single normalized
   "demand" signal between a sampled turndown point and a sampled full-load
   point. Real multi-variable combustion control (staging, pilot/main
   splits, IGV schedules) is not modeled.
-- Setpoint changes ramp over minutes without overshoot, consistent with how
-  real heavy-duty turbine control systems actively avoid firing-temperature
-  overshoot (see Resources). Fast cold-start/ignition transients are
-  excluded by design (see above).
+- Setpoint changes are ramp-rate limited (2-6% of full load per minute,
+  sampled per run) with no overshoot, consistent with how real heavy-duty
+  turbine control systems actively avoid firing-temperature overshoot (see
+  Resources). Re-dispatch timing is irregular but drawn from fixed
+  distributions (denser through the morning/evening ramp hours), not from a
+  market model. Fast cold-start/ignition transients are excluded by design
+  (see above).
+- AGC is modeled as an Ornstein-Uhlenbeck process on load, with phi moving
+  alongside it through the same load-to-phi mapping the dispatch uses. Real
+  regulation signals (e.g. PJM RegA/RegD) have their own spectra; this only
+  captures their mean-reverting, minutes-correlated character.
+- Disturbances are setpoint-level perturbations, not physical faults: a
+  runback is a commanded load/fuel cut, a fuel shift is an effective phi
+  offset (the fuel composition itself doesn't change), and combustion
+  dynamics is an imposed phi oscillation, not an acoustic instability.
+  Ambient steps (weather fronts) aren't modeled, since their effect on flame
+  temperature sits below the sensor noise.
 - A run's seasonal baseline (the climatological "which month is it")
   is fixed at that run's start date; only the diurnal and weekday/weekend
   components evolve across the 30 simulated days, since a calendar month's
@@ -354,3 +425,4 @@ Detection and clustering:
 
 - [indsl.detect](https://indsl.docs.cognite.com/detect.html)
 - [scikit-learn](https://scikit-learn.org)
+- [Plotly](https://plotly.com/python/) (interactive detection plot)
