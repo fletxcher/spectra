@@ -21,6 +21,13 @@ CHANNELS = {
     "phi": "phi_cmd",
 }
 
+# ED-Pelt's pruning only works when it finds many change points. Pressure is
+# noise-dominated, so it finds few and hits the O(n^2) worst case: >10 min
+# per call on 30 days at 15 s (vs ~17 s on temperature), with calibration
+# MCC ~0.005 on that channel anyway. Skipped pairs are recorded with
+# error="skipped" rather than silently dropped.
+SKIP = {("pressure", "ssd_cpd"), ("pressure", "ssd_cpd_tuned"), ("pressure", "cpd_ed_pelt")}
+
 
 def evaluate_run(run_dir: Path, window_seconds: int = WINDOW_SECONDS) -> list[dict]:
     df = pd.read_parquet(run_dir / "data.parquet")
@@ -34,6 +41,9 @@ def evaluate_run(run_dir: Path, window_seconds: int = WINDOW_SECONDS) -> list[di
     for channel_label, column in CHANNELS.items():
         series = pd.Series(df[column].to_numpy(), index=idx)
         for method in METHODS:
+            if (channel_label, method.name) in SKIP:
+                rows.append({"run_id": run_dir.name, "channel": channel_label, "method": method.name, "error": "skipped"})
+                continue
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
@@ -61,6 +71,8 @@ def evaluate_run(run_dir: Path, window_seconds: int = WINDOW_SECONDS) -> list[di
                     "recall": pm.recall,
                     "f1": pm.f1,
                     "accuracy": pm.accuracy,
+                    "mcc": pm.mcc,
+                    "balanced_accuracy": pm.balanced_accuracy,
                     "n_true_steady": pm.n_true_steady,
                     "n_pred_steady": pm.n_pred_steady,
                     "n_total": pm.n_total,

@@ -1,7 +1,10 @@
-"""Extracts steady points from a run: each contiguous dispatch segment the
+"""Extracts steady points from a run: each contiguous stretch the
 simulator's ground-truth `is_steady` label marks as settled (and which lasts
 at least `min_window_s`) becomes one steady point, summarized by the mean of
-its operating-point and emissions signals over that dwell."""
+its operating-point and emissions signals over that dwell. Stretches are
+split on every transient, not grouped by dispatch segment, since a
+disturbance can break one segment into several distinct steady windows
+(e.g. before a fuel shift, on its plateau, and after it)."""
 
 from __future__ import annotations
 
@@ -19,12 +22,13 @@ WINDOW_SECONDS_MIN = 60
 
 def extract_steady_points(run_dir: Path, min_window_s: float = WINDOW_SECONDS_MIN) -> pd.DataFrame:
     df = pd.read_parquet(run_dir / "data.parquet")
+    region_id = (df["is_steady"] != df["is_steady"].shift()).cumsum()
     steady = df[df["is_steady"]]
     if steady.empty:
         return pd.DataFrame(columns=["run_id", "segment_id", "start_time", "end_time", "duration_s", *FEATURE_COLUMNS])
 
     rows = []
-    for segment_id, g in steady.groupby("segment_id"):
+    for _, g in steady.groupby(region_id[df["is_steady"]]):
         duration = float(g["time"].max() - g["time"].min())
         if duration < min_window_s or len(g) < 2:
             continue
@@ -33,7 +37,7 @@ def extract_steady_points(run_dir: Path, min_window_s: float = WINDOW_SECONDS_MI
         rows.append(
             {
                 "run_id": run_dir.name,
-                "segment_id": int(segment_id),
+                "segment_id": int(g["segment_id"].iloc[0]),
                 "start_time": float(g["time"].min()),
                 "end_time": float(g["time"].max()),
                 "duration_s": duration,

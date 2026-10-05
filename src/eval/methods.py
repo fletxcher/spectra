@@ -67,10 +67,10 @@ def _ssd_cpd(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
 # Calibrated via grid search (src/eval/calibrate.py) against a held-out
 # calibration slice, distinct from the evaluation run set.
 SSD_CPD_TUNED_PARAMS = {
-    "temperature": dict(var_threshold=5.0, slope_threshold=-5.0),
-    "pressure": dict(var_threshold=5.0, slope_threshold=-4.0),
-    "mass_flow": dict(var_threshold=10.0, slope_threshold=-6.0),
-    "phi": dict(var_threshold=500.0, slope_threshold=-6.0),
+    "temperature": dict(var_threshold=100.0, slope_threshold=-4.0),
+    "pressure": dict(var_threshold=1.0, slope_threshold=-5.0),
+    "mass_flow": dict(var_threshold=100.0, slope_threshold=-6.0),
+    "phi": dict(var_threshold=50.0, slope_threshold=-7.0),
 }
 
 
@@ -110,12 +110,12 @@ def _cusum(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
     return out == 0
 
 
-# Calibrated via grid search: k_drift=4.0, k_thresh=12.0, applied relative
-# to a per-series noise-floor estimate (replaces indsl's default drift
-# formula, which goes deeply negative -- and thus fires constantly -- on
-# absolute-scale signals like Kelvin or Pascal).
-CUSUM_K_DRIFT = 4.0
-CUSUM_K_THRESH = 12.0
+# Calibrated via grid search (by MCC), applied relative to a per-series
+# noise-floor estimate (replaces indsl's default drift formula, which goes
+# deeply negative -- and thus fires constantly -- on absolute-scale signals
+# like Kelvin or Pascal).
+CUSUM_K_DRIFT = 1.0
+CUSUM_K_THRESH = 3.0
 
 
 def _cusum_tuned(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
@@ -141,7 +141,13 @@ def _oscillation(series: pd.Series, dt_seconds: float, channel: str) -> pd.Serie
     return _align(out, series.index) == 0
 
 
+def _always_steady(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
+    """Trivial baseline: anything that can't beat this isn't detecting."""
+    return pd.Series(True, index=series.index)
+
+
 METHODS: list[Method] = [
+    Method("always_steady", _always_steady),
     Method("ssd_cpd", _ssd_cpd),
     Method("ssd_cpd_tuned", _ssd_cpd_tuned),
     Method("ssid", _ssid),

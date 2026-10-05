@@ -14,10 +14,18 @@ from src.eval.labels import WINDOW_SECONDS, steady_window_label
 
 @dataclass(frozen=True)
 class PointMetrics:
+    """F1/precision/recall are on the "steady" class and reward a constant
+    "always steady" predictor whenever steady is common, so they can't tell
+    a working detector from one that never fires. MCC (Matthews correlation)
+    and balanced accuracy don't have that flaw: any constant predictor scores
+    MCC = 0 / balanced accuracy = 0.5. MCC is the headline metric."""
+
     precision: float
     recall: float
     f1: float
     accuracy: float
+    mcc: float
+    balanced_accuracy: float
     n_true_steady: int
     n_pred_steady: int
     n_total: int
@@ -38,7 +46,15 @@ def point_metrics(y_true: pd.Series, y_pred: pd.Series) -> PointMetrics:
     total = tp + fp + fn + tn
     accuracy = (tp + tn) / total if total > 0 else 0.0
 
-    return PointMetrics(precision, recall, f1, accuracy, int(y_true.sum()), int(y_pred.sum()), len(y_true))
+    denom = np.sqrt(float(tp + fp) * float(tp + fn) * float(tn + fp) * float(tn + fn))
+    mcc = (tp * tn - fp * fn) / denom if denom > 0 else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    balanced_accuracy = (recall + specificity) / 2
+
+    return PointMetrics(
+        precision, recall, f1, accuracy, float(mcc), balanced_accuracy,
+        int(y_true.sum()), int(y_pred.sum()), len(y_true),
+    )
 
 
 @dataclass(frozen=True)
