@@ -35,7 +35,7 @@ def relabel(case) -> tuple[str, float, float]:
 
     old_rate = float(df.is_steady.mean())
     settled = np.array([profile.label_at(t)[1] for t in df.time])
-    df["is_steady"] = settled & profile.steady_mask(df.time.to_numpy(), df.load_cmd.to_numpy(), df.phi_cmd.to_numpy())
+    df["is_steady"] = profile.steady_labels(df.time.to_numpy(), df.load_cmd.to_numpy(), df.phi_cmd.to_numpy(), settled)
 
     tmp = path.with_suffix(".parquet.tmp")
     df.to_parquet(tmp, index=False)

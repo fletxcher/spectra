@@ -1,9 +1,10 @@
 """Regenerates everything under samples/ that README.md embeds:
 
-- samples/<region>/{conditions.txt,temperature.png,emissions.png}: copied
-  from the first run of each region (runs cycle regions as i % 9).
-- samples/<region>/detection_before_after.{png,html}: ssd_cpd defaults vs.
-  tuned (the .html is an interactive, zoomable Plotly version).
+- samples/<region>/{conditions.txt,temperature.png,emissions.png}: the
+  first run of each region (runs cycle regions as i % 9), with the plots
+  drawn over the first SAMPLE_DAYS of the run.
+- samples/<region>/detection_before_after.png: ssd_cpd defaults vs. tuned,
+  over the same window.
 - samples/<region>/clusters_on_timeseries.png: detected groups on the trace.
 - samples/<region>/clustering_example.png: groups in load/temperature space.
 
@@ -21,26 +22,25 @@ import sys
 import warnings
 from pathlib import Path
 
-import indsl.detect as indsl_detect
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 from src.cluster.cluster import cluster_steady_points
 from src.cluster.extract import extract_steady_points
 from src.cluster.naming import name_clusters
 from src.eval.labels import to_datetime_index
-from src.eval.methods import SSD_CPD_TUNED_PARAMS
+from src.eval.methods import METHODS
 from src.sim.regions import REGIONS
+from src.sim.report import plot_emissions_window, plot_temperature_window, time_axis
 
 DATASETS_DIR = Path("datasets")
 SAMPLES_DIR = Path("samples")
 DEFAULT_GROUPING_RUNS = ["run_00000"]
+SAMPLE_DAYS = 1.0  # matches the one-day detection evaluation
 
 
 def region_of(run_id: str) -> tuple[str, str]:
@@ -52,15 +52,18 @@ def region_of(run_id: str) -> tuple[str, str]:
     raise ValueError(f"no region in {run_id}/conditions.txt")
 
 
-def copy_region_samples() -> None:
+def make_region_samples(days: float = SAMPLE_DAYS) -> None:
     for i in range(len(REGIONS)):
         run_id = f"run_{i:05d}"
-        key, _ = region_of(run_id)
+        key, name = region_of(run_id)
         out = SAMPLES_DIR / key
         out.mkdir(parents=True, exist_ok=True)
-        for name in ("conditions.txt", "temperature.png", "emissions.png"):
-            shutil.copy(DATASETS_DIR / run_id / name, out / name)
-        print(f"copied {run_id} -> {out}/")
+        shutil.copy(DATASETS_DIR / run_id / "conditions.txt", out / "conditions.txt")
+        df = pd.read_parquet(DATASETS_DIR / run_id / "data.parquet")
+        window = df[df.time < days * 86400.0]
+        plot_temperature_window(window, run_id, name, out / "temperature.png")
+        plot_emissions_window(window, run_id, name, out / "emissions.png")
+        print(f"wrote {run_id} -> {out}/")
 
 
 def _cluster(run_id: str, cluster_col: str) -> pd.DataFrame:
@@ -86,11 +89,13 @@ def _detection_data(run_id: str, days: float) -> dict:
     series = pd.Series(window["temperature"].to_numpy(), index=idx)
     temp = window.temperature.to_numpy()
 
-    def detect(**params) -> np.ndarray:
+    dt_seconds = float(window.time.diff().median())
+
+    def detect(method_name: str) -> np.ndarray:
+        method = next(m for m in METHODS if m.name == method_name)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            out = indsl_detect.ssd_cpd(series, min_distance=4, **params)
-        return out.reindex(idx).ffill().fillna(0).to_numpy()
+            return method.run(series, dt_seconds, "temperature").to_numpy().astype(float)
 
     tmin, tmax = temp.min(), temp.max()
     pad = 0.05 * (tmax - tmin)
@@ -98,12 +103,12 @@ def _detection_data(run_id: str, days: float) -> dict:
         "key": key,
         "name": name,
         "run_id": run_id,
-        "time_days": window.time.to_numpy() / 86400.0,
+        "time_s": window.time.to_numpy(),
         "temp": temp,
         "is_steady": window.is_steady.to_numpy(),
         "panels": [
-            ("ssd_cpd (library defaults)", detect(var_threshold=2.0, slope_threshold=-3.0)),
-            ("ssd_cpd_tuned (calibrated)", detect(**SSD_CPD_TUNED_PARAMS["temperature"])),
+            ("ssd_cpd (library defaults)", detect("ssd_cpd")),
+            ("ssd_cpd_tuned (calibrated)", detect("ssd_cpd_tuned")),
         ],
         "y_low": tmin - pad,
         "y_high": tmax + pad,
@@ -114,57 +119,24 @@ def make_detection_before_after(d: dict) -> None:
     y_low, y_high = d["y_low"], d["y_high"]
     fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
     for ax, (title, pred) in zip(axes, d["panels"]):
+        t = time_axis(ax, d["time_s"])
         ax.set_ylim(y_low, y_high)
         ax.fill_between(
-            d["time_days"], y_low, np.where(d["is_steady"], y_high, y_low), step="post",
+            t, y_low, np.where(d["is_steady"], y_high, y_low), step="post",
             color="gray", alpha=0.2, label="ground truth steady", zorder=0,
         )
-        ax.plot(d["time_days"], d["temp"], color="tab:red", lw=0.6, label="chamber temperature (observed)", zorder=2)
-        ax.plot(d["time_days"], np.where(pred == 1, y_high, y_low), color="tab:blue", lw=1.4,
+        ax.plot(t, d["temp"], color="tab:red", lw=0.6, label="chamber temperature (observed)", zorder=2)
+        ax.plot(t, np.where(pred == 1, y_high, y_low), color="tab:blue", lw=1.4,
                 drawstyle="steps-post", label="detector", zorder=3)
         ax.set_ylabel("temperature [K]")
         ax.set_title(f"{title}: {d['run_id']} ({d['name']})")
         ax.legend(loc="lower right", fontsize=8)
 
-    axes[1].set_xlabel("time [days]")
+    axes[0].set_xlabel("")
     fig.tight_layout()
     out_path = SAMPLES_DIR / d["key"] / "detection_before_after.png"
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
-    print(f"saved {out_path}")
-
-
-def make_detection_html(d: dict) -> None:
-    """Interactive version of make_detection_before_after: same data, but
-    zoomable, with both panels' x-axes linked so zooming one zooms both."""
-    y_low, y_high = d["y_low"], d["y_high"]
-    t = d["time_days"]
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-        subplot_titles=[f"{title}: {d['run_id']} ({d['name']})" for title, _ in d["panels"]],
-    )
-    for row, (_, pred) in enumerate(d["panels"], start=1):
-        first = row == 1
-        fig.add_trace(go.Scatter(
-            x=t, y=np.where(d["is_steady"], y_high, y_low), line_shape="hv", fill="tozeroy",
-            line=dict(width=0), fillcolor="rgba(128,128,128,0.2)", name="ground truth steady",
-            legendgroup="gt", showlegend=first, hoverinfo="skip",
-        ), row=row, col=1)
-        fig.add_trace(go.Scatter(
-            x=t, y=d["temp"], line=dict(color="#d62728", width=0.8), name="chamber temperature (observed)",
-            legendgroup="temp", showlegend=first, hovertemplate="day %{x:.4f}<br>%{y:.1f} K<extra></extra>",
-        ), row=row, col=1)
-        fig.add_trace(go.Scatter(
-            x=t, y=np.where(pred == 1, y_high, y_low), line_shape="hv", line=dict(color="#1f77b4", width=1.5),
-            name="detector", legendgroup="det", showlegend=first, hoverinfo="skip",
-        ), row=row, col=1)
-        fig.update_yaxes(title_text="temperature [K]", range=[y_low, y_high], row=row, col=1)
-
-    fig.update_xaxes(title_text="time [days]", row=2, col=1)
-    fig.update_layout(height=750, template="simple_white", hovermode="x unified",
-                      legend=dict(orientation="h", y=-0.12))
-    out_path = SAMPLES_DIR / d["key"] / "detection_before_after.html"
-    fig.write_html(out_path, include_plotlyjs="cdn")
     print(f"saved {out_path}")
 
 
@@ -217,10 +189,9 @@ def make_clustering_example(run_id: str, cluster_col: str = "kmeans_cluster") ->
 if __name__ == "__main__":
     for stale in SAMPLES_DIR.glob("*/clustering_example.png"):
         stale.unlink()
-    copy_region_samples()
-    detection = _detection_data("run_00000", days=3.0)
-    make_detection_before_after(detection)
-    make_detection_html(detection)
+    make_region_samples()
+    for i in range(len(REGIONS)):  # the same per-region runs make_region_samples uses
+        make_detection_before_after(_detection_data(f"run_{i:05d}", days=SAMPLE_DAYS))
     make_clusters_on_timeseries()
     for arg in sys.argv[1:] or DEFAULT_GROUPING_RUNS:
         run_id, _, col = arg.partition(":")

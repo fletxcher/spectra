@@ -38,10 +38,15 @@ fuel blend, site elevation) are Latin-hypercube sampled across runs.
 finished, no disturbance transient is in progress, and the commanded
 operating point has stayed inside a +/-0.5%-of-full-load band (and the
 equivalent phi band) over the trailing 60 s. Stability is judged on the
-signal's own recent history, so a detector can in principle recover it: on
-the noise-free commanded signal, a signal-only check reproduces the labels
-at MCC 0.87-0.99. Across the 200 runs the steady fraction ranges from 37%
-(units regulating hard) to 98%, median 89%.
+signal's own recent history, so a detector can in principle recover it.
+
+AGC excursions shorter than 2 minutes are counted as steady: an AGC move
+only becomes a transient when it pushes the operating point out of the band
+for at least 2 minutes. Without this rule, AGC noise crossing the band edge
+produced ~20,000 transient blips of ~30 s per run, which no operator would
+call a change of operating point. Dispatch ramps and disturbances are
+always transient, however short. Across the 200 runs the steady fraction
+ranges from 72% (units regulating hard) to 98%, median 97%.
 
 Each run is written with both the ground truth and a noisy "observed" trace,
 plus per-timestep `segment_id` / `is_steady` / `disturbance` labels to score
@@ -103,8 +108,11 @@ What actually differs between regions, physically:
   to the daily peak.
 
 A full example run per region is included under `samples/<region>/`
-(`conditions.txt`, `temperature.png`, `emissions.png`; `data.parquet`
-omitted, ~30MB/run). Three contrasting examples:
+(`conditions.txt`, `temperature.png`, `emissions.png`, and
+`detection_before_after.png` from Phase 2; `data.parquet` omitted,
+~30MB/run). The sample plots show the first 24 hours of each run, the same
+window Phase 2 evaluates on; `conditions.txt` still covers all 30 days.
+Three contrasting examples:
 
 **United States**: double-peak, summer-dominant, moderate swing
 ![United States temperature](samples/united_states/temperature.png)
@@ -130,64 +138,105 @@ simulator's per-sample `is_steady` label via a rolling 60s AND (`src/eval/labels
 a point only counts as a valid steady window if every sample in the
 preceding 60 seconds was also steady.
 
-All 8 univariate detectors in [indsl.detect](https://indsl.docs.cognite.com/detect.html),
+**Evaluation window: one day.** Every detector is scored on the first 24
+hours of each run (5,760 samples per channel at 15 s). One day already holds
+the full daily cycle: the overnight trough, the morning and evening demand
+ramps, ~14 re-dispatches, 1-3 disturbances, and continuous AGC. All 8
+univariate detectors in [indsl.detect](https://indsl.docs.cognite.com/detect.html),
 plus calibrated variants of `ssd_cpd` and `cusum` and an `always_steady`
 baseline, were run against 4 channels (chamber temperature, pressure, air
-mass flow, phi) across a 40-run held-out sample (`src/eval/methods.py`,
-`run_eval.py`). In this sample, 65.2% of samples are inside a true 60 s
+mass flow, phi) on 195 runs: every run except the 5 calibration runs, which
+gives 21-23 runs for each of the 9 regions (`src/eval/methods.py`,
+`run_eval.py`). In this window, 93.5% of samples are inside a true 60 s
 steady window.
 
 **Metric.** The headline metric is MCC (Matthews correlation coefficient):
 1 is perfect, 0 is no better than chance, and any constant predictor
 ("always steady" or "never steady") scores exactly 0. F1 on the steady class
-can't be the headline. At a 65% base rate, `always_steady` scores F1 = 0.758
-without detecting anything, and an F1-tuned detector simply converges on
-that trivial answer.
+can't be the headline. At a 93.5% base rate, `always_steady` scores
+F1 = 0.965 without detecting anything, and an F1-tuned detector simply
+converges on that trivial answer.
 
 **Calibration** (`src/eval/calibrate.py`): `ssd_cpd` (per channel) and
 `cusum` (one global setting, scaled to each series' noise floor) were
-grid-searched by MCC on a held-out 5-run slice, distinct from the 40
-evaluation runs.
+grid-searched by MCC on the first day of 5 held-out runs, distinct from the
+evaluation runs. ED-Pelt cuts a shorter series into more segments, so the
+best `ssd_cpd` thresholds depend on the input length: `methods.py` keeps a
+one-day set and a 4-day set and uses whichever was calibrated on the length
+closest to its input. `cusum` lands on the same setting at both lengths
+(drift 2x and threshold 12x the noise floor).
 
-**Results** (mean MCC over 40 runs):
+**Input averaging.** indsl resamples the input of `ssd_cpd` and
+`cpd_ed_pelt` to >=60 s spacing by keeping every 4th sample at 15 s, which
+throws samples away without averaging any noise out. Both are fed 60 s block
+means instead, with `min_distance` counted in those 60 s samples.
 
-| Method | temperature | mass flow | phi | pressure | overall MCC | balanced acc. | F1 |
-|---|---|---|---|---|---|---|---|
-| `cpd_ed_pelt` | 0.115 | 0.140 | 0.162 | skipped | **0.139** | 0.522 | 0.760 |
-| `cusum_tuned` | **0.177** | **0.164** | 0.078 | 0.000 | 0.105 | **0.554** | 0.662 |
-| `ssid` | 0.094 | 0.164 | 0.071 | 0.000 | 0.082 | 0.523 | 0.628 |
-| `vma` | 0.047 | 0.095 | 0.117 | 0.000 | 0.065 | 0.544 | 0.495 |
-| `ssd_cpd_tuned` | 0.050 | 0.070 | 0.062 | skipped | 0.061 | 0.507 | 0.758 |
-| `ssd_cpd` (defaults) | 0.002 | 0.000 | 0.014 | skipped | 0.006 | 0.504 | 0.031 |
-| `unchanged_signal_detector` | 0.000 | 0.000 | 0.020 | 0.000 | 0.005 | 0.500 | 0.001 |
-| `cusum` (defaults) | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.000 |
-| `drift` | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.758 |
-| `oscillation_detector` | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.758 |
-| `always_steady` (baseline) | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.758 |
+**Results** (mean MCC over 195 runs; overall MCC is the mean over all four
+channels):
+
+| Method | temperature | mass flow | phi | pressure | overall MCC | balanced acc. | F1 | called steady |
+|---|---|---|---|---|---|---|---|---|
+| `cpd_ed_pelt` | **0.291** | 0.287 | **0.298** | 0.000 | **0.219** | 0.552 | **0.967** | 99.2% |
+| `cusum_tuned` | 0.168 | **0.294** | 0.125 | 0.000 | 0.147 | **0.573** | 0.903 | 88.3% |
+| `ssid` | 0.180 | 0.271 | 0.015 | 0.000 | 0.117 | 0.543 | 0.782 | 77.1% |
+| `ssd_cpd_tuned` | 0.081 | 0.107 | 0.109 | -0.004 | 0.073 | 0.546 | 0.877 | 83.8% |
+| `vma` | 0.045 | 0.064 | 0.079 | 0.000 | 0.047 | 0.554 | 0.561 | 39.4% |
+| `ssd_cpd` (defaults) | 0.005 | 0.000 | 0.010 | -0.004 | 0.003 | 0.503 | 0.251 | 23.5% |
+| `unchanged_signal_detector` | 0.000 | 0.000 | 0.002 | 0.000 | 0.001 | 0.500 | 0.001 | 0.0% |
+| `cusum` (defaults) | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.000 | 0.0% |
+| `drift` | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.965 | 100% |
+| `oscillation_detector` | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.965 | 100% |
+| `always_steady` (baseline) | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.500 | 0.965 | 100% |
+
+**By region** (mean MCC over temperature, mass flow and phi):
+
+| Region | Runs | Truly steady | `cpd_ed_pelt` | `cusum_tuned` | `ssid` | `ssd_cpd_tuned` |
+|---|---|---|---|---|---|---|
+| United States | 23 | 92.7% | 0.281 | 0.208 | 0.162 | 0.119 |
+| Canada | 22 | 94.6% | 0.301 | 0.201 | 0.158 | 0.097 |
+| Central America | 21 | 94.1% | 0.316 | 0.178 | 0.149 | 0.081 |
+| South America | 22 | 92.1% | 0.293 | 0.233 | 0.187 | 0.118 |
+| Europe | 22 | 93.7% | 0.301 | 0.174 | 0.145 | 0.099 |
+| Middle East | 21 | 94.0% | 0.281 | 0.213 | 0.160 | 0.103 |
+| Russia | 21 | 94.8% | 0.311 | 0.183 | 0.142 | 0.102 |
+| China | 21 | 91.2% | 0.282 | 0.179 | 0.149 | 0.080 |
+| India | 22 | 94.1% | 0.262 | 0.189 | 0.148 | 0.092 |
 
 **Findings:**
 
 - **No detector reliably detects steady windows on this data.** The best
-  mean MCC is 0.14 and no balanced accuracy exceeds 0.554. The best single
-  run/channel result is MCC 0.47 (`cusum_tuned`). No method beats
-  `always_steady` on F1.
-- **The limit is sensor noise, not the labels.** A signal-only stability
-  check on the *noise-free* commanded signal recovers the ground truth at
-  MCC 0.87-0.99. On the observed channels, the +/-0.5% load band works out
-  to roughly 6 K of chamber temperature, under ~20 K of measurement noise.
+  overall MCC is 0.22 (`cpd_ed_pelt`) and no balanced accuracy exceeds
+  0.573. The best single run/channel result is MCC 0.55 (`cusum_tuned` on
+  the mass flow of `run_00120`, South America). `cpd_ed_pelt` edges
+  `always_steady` on F1 by 0.002, because it calls 99.2% of samples steady.
+- **The detectors resolve hours while the transients last minutes.** On one
+  day of chamber temperature, ED-Pelt finds a median of 13.5 change points,
+  so its segments run a median 85 min (p10 20 min). The ground truth has a
+  median of 24 transient gaps per day, with a median length of 2 min, and
+  96% of them last 5 min or less. `ssd_cpd` and `cpd_ed_pelt` classify whole
+  segments, so a 2-minute AGC transient inside an 85-minute segment barely
+  moves that segment's statistics. Their MCC comes from the large dispatch
+  ramps and disturbances, which do produce change points.
+- **One day scores the same as a full month.** On the 40-run evaluation set,
+  the full 30-day runs put the best method per channel within 0.05 MCC of
+  the one-day scores above. The exception is `ssd_cpd_tuned`: on 30 days it
+  calls 99.7% of samples steady, while its one-day thresholds bring that down
+  to 84%. It then switches whole multi-hour blocks whose edges miss the true
+  gaps (figure below), which is why its MCC stays at 0.07-0.11.
+- **Region makes no difference.** `cpd_ed_pelt` scores 0.26-0.32 in every
+  region and `cusum_tuned` 0.17-0.23. Detection difficulty is set by the AGC
+  amplitude and sensor noise, which are sampled independently of region.
 - **Several methods degenerate to a constant.** `drift` and
-  `oscillation_detector` never fire. `cusum` with library defaults always
-  fires (its default drift term goes deeply negative on absolute-scale
-  signals like Kelvin or Pascal). `ssd_cpd_tuned` and `cpd_ed_pelt` call
-  >99% of samples steady; their small positive MCC comes from the rare
-  samples they do flag being right.
+  `oscillation_detector` never fire. `cusum` with library defaults and
+  `unchanged_signal_detector` flag everything as transient (the default
+  `cusum` drift term goes deeply negative on absolute-scale signals like
+  Kelvin or Pascal).
 - **Pressure is uninformative for every method** (MCC ~0). Chamber pressure
   is held near its target by the controller, so it carries little
-  operating-point information. `ssd_cpd`, `ssd_cpd_tuned` and `cpd_ed_pelt`
-  were skipped on pressure: on that noise-dominated signal ED-Pelt finds few
-  change points and hits its O(n^2) worst case (>10 min per call vs ~17 s on
-  temperature), with calibration MCC ~0.005 there anyway. Skipped pairs are
-  recorded as `error="skipped"` in the results.
+  operating-point information. On full 30-day runs, `ssd_cpd`,
+  `ssd_cpd_tuned` and `cpd_ed_pelt` are skipped on pressure, where ED-Pelt
+  hits its O(n^2) worst case (~2 min per call); on one day that case is
+  cheap and every method runs.
 
 **Earlier result, superseded.** On the first, idealized dataset (fixed
 4-hour dispatch, perfectly flat holds, 94.5% steady), tuned `ssd_cpd` and
@@ -195,51 +244,45 @@ evaluation runs.
 plateaus that any detector could find, and from F1 rewarding near-constant
 "steady" predictions. They don't carry over to the realistic data.
 
-`ssd_cpd` on `run_00000`'s temperature channel, library defaults vs. tuned,
-against the ground-truth steady regions (shaded gray). An **interactive,
-zoomable version** is in
-[`samples/united_states/detection_before_after.html`](samples/united_states/detection_before_after.html)
-(download it and open it in a browser; GitHub shows `.html` files as source).
-Zoom into any few-minute stretch there to see the individual AGC excursions
-that the static plot below compresses into hairline gaps.
+`ssd_cpd` on the first day of `run_00000`'s temperature channel, library
+defaults vs. tuned, against the ground-truth steady regions (shaded gray):
 
 ![ssd_cpd before and after tuning](samples/united_states/detection_before_after.png)
 
-The defaults (top) almost never call anything steady. The tuned version
-(bottom) calls almost everything steady. Neither tracks the thousands of
-short transient gaps in the ground truth.
+The defaults (top) never call anything steady. The tuned version (bottom)
+switches between blocks of several hours, while the ground truth's
+transient gaps (the thin white lines) last a few minutes each. The same
+plot for every other region's sample run is in
+`samples/<region>/detection_before_after.png`.
 
 ```bash
-# calibration: one process per (method, channel), each writes calib_<method>_<channel>.json
-.venv/bin/python -m src.eval.calibrate ssd_cpd temperature
-.venv/bin/python -m src.eval.calibrate cusum temperature
+# calibration on the first day: one process per (method, channel), each writes calib_<method>_<channel>_1d.json
+.venv/bin/python -m src.eval.calibrate ssd_cpd temperature 1
+.venv/bin/python -m src.eval.calibrate cusum temperature 1
 
-# 40-run evaluation (~85 min on 3 workers)
-.venv/bin/python -c "
-from src.eval.run_eval import evaluate_sweep
-df = evaluate_sweep('datasets', run_ids=[f'run_{i:05d}' for i in range(0, 200, 5)], workers=3)
-df.to_parquet('eval_results.parquet', index=False)
-"
+# one-day evaluation of every non-calibration run (~10 min on 3 workers), writes eval_results_all_1d.parquet
+.venv/bin/python -m src.eval.run_eval --days 1 --runs all --workers 3
 
 # regenerate everything under samples/ (grouping example runs as args)
-.venv/bin/python scripts/make_sample_figures.py run_00000 run_00077:hdbscan
+.venv/bin/python scripts/make_sample_figures.py run_00000 run_00188:hdbscan
 ```
 
 ## Phase 3: automatic grouping of steady points
 
 Goal: given the extracted steady windows, automatically group similar
-operating points into named regimes.
+operating points into named regimes. Grouping uses the full 30 days of each
+run, since a single day holds only ~20 steady points.
 
 - **Extraction** (`src/cluster/extract.py`): each contiguous stretch the
   ground truth marks steady for >=60 s becomes one steady point, summarized
   by its mean temperature, pressure, air/fuel mass flow, phi, load_fraction,
   NOx, and CO over that dwell. Stretches split on every transient, so one
   dispatch segment can yield several points (before a fuel shift, on its
-  plateau, after it). AGC breaks holds into many short windows: ~6,000
-  points per run (median dwell 2-4 min), 1.05M total across 200 runs.
+  plateau, after it). That gives a median of 674 points per run (589-3,604),
+  181,530 in total across 200 runs, with a median dwell of 28 min (p10
+  4 min, p90 2 h).
 - **Clustering** (`src/cluster/cluster.py`): HDBSCAN (picks cluster count
-  automatically, flags ambiguous points as noise rather than forcing them
-  into a cluster) cross-checked against KMeans with *k* chosen by
+  automatically and flags ambiguous points as noise) cross-checked against KMeans with *k* chosen by
   silhouette score, run independently per engine/run.
 - **Naming** (`src/cluster/naming.py`): clusters are ranked by mean
   `load_fraction` and mapped onto an ordered vocabulary (Minimum / Low /
@@ -248,18 +291,18 @@ operating points into named regimes.
 
 **Findings**:
 
-- **KMeans settles on k=2 for all 200 runs** (silhouette 0.53-0.67, median
-  0.61, with no regional difference): an off-peak band and a peak band. With AGC, the steady points
-  fill the load range almost continuously, and on a continuous 1-D spread
-  silhouette prefers a single split.
-- **HDBSCAN** finds 2 regimes in 149 runs, 3 in 35, and 4-7 in the other
-  16, flagging a median 22% of points (14-34%, p10-p90) as noise rather than
-  forcing them into a band.
+- **KMeans settles on k=2 for 194 of 200 runs** (k=3 for 3 runs, k=4, 5
+  and 7 for one each; silhouette 0.54-0.65, median 0.59, with no regional
+  difference): an off-peak band and a peak band. The steady points fill the
+  load range almost continuously, and on a continuous 1-D spread silhouette
+  prefers a single split.
+- **HDBSCAN** finds 2 regimes in 135 runs, 3 in 52, 4 in 9 and 5 in 4,
+  flagging a median 19% of points (14-33%, p10-p90) as noise.
 - **The v1 regional pattern did not survive.** On the earlier idealized
   data (180 perfectly flat plateaus per run, sitting at a few discrete
   demand levels), single-peak regions resolved to 2 clusters and
   double-peak regions to 3. That separation came from how few, and how
-  clean, v1's plateaus were, not from region; on v2 every region looks the
+  clean, v1's plateaus were; on the realistic data every region looks the
   same to KMeans.
 - **Disturbances add real off-axis structure.** Every steady point used to
   sit on one load/temperature curve, since within a run everything was a
@@ -274,32 +317,34 @@ from (`run_00000`, United States):
 
 ![Groups on the actual time series](samples/united_states/clusters_on_timeseries.png)
 
-**run_00000 (United States, KMeans k=2, silhouette=0.61, 9,466 steady points)**
+**run_00000 (United States, KMeans k=2, silhouette=0.62, 802 steady points)**
 
 | Group | Points | Temp [K] | Load Fraction | Phi | NOx [ppm] | CO [ppm] |
 |---|---|---|---|---|---|---|
-| Off-Peak / Low Load | 4082 | 1851 | 0.82 | 0.56 | 11.3 | 449 |
-| Peak / High Load | 5384 | 1998 | 0.92 | 0.65 | 45.2 | 546 |
+| Off-Peak / Low Load | 277 | 1853 | 0.81 | 0.57 | 11.8 | 449 |
+| Peak / High Load | 525 | 2003 | 0.92 | 0.65 | 47.2 | 553 |
 
 ![United States example grouping](samples/united_states/clustering_example.png)
 
-**run_00077 (Middle East, HDBSCAN, 5 regimes, silhouette=0.20, 6,841 steady points)**
+**run_00188 (India, HDBSCAN, 5 regimes, silhouette=0.23, 1,542 steady points)**
 
 | Group | Points | Temp [K] | Load Fraction | Phi | NOx [ppm] | CO [ppm] |
 |---|---|---|---|---|---|---|
-| Minimum Load | 1870 | 1942 | 0.77 | 0.58 | 17.8 | 563 |
-| Below-Average Load | 386 | 2028 | 0.82 | 0.63 | 38.3 | 623 |
-| Above-Average Load | 352 | 2077 | 0.85 | 0.66 | 61.0 | 697 |
-| Unclassified / Transitional | 1908 | 2133 | 0.88 | 0.70 | 174.7 | 1063 |
-| High Load | 1771 | 2164 | 0.90 | 0.71 | 141.9 | 953 |
-| Peak Load | 554 | 2237 | 0.95 | 0.76 | 267.0 | 1352 |
+| Minimum Load | 225 | 1932 | 0.76 | 0.53 | 29.6 | 152 |
+| Below-Average Load | 199 | 2037 | 0.83 | 0.59 | 104.3 | 192 |
+| Unclassified / Transitional | 494 | 2088 | 0.86 | 0.62 | 359.6 | 335 |
+| Above-Average Load | 109 | 2099 | 0.87 | 0.63 | 209.0 | 251 |
+| High Load | 326 | 2154 | 0.91 | 0.66 | 384.0 | 348 |
+| Peak Load | 189 | 2205 | 0.95 | 0.70 | 636.6 | 487 |
 
-![Middle East example grouping](samples/middle_east/clustering_example.png)
+![India example grouping](samples/india/clustering_example.png)
 
-The off-curve points above and below the main line are fuel-shift and
-runback plateaus. HDBSCAN puts them in "Unclassified / Transitional"
-instead of assigning them to a load band they don't belong to, which is
-also why that group's mean NOx and CO sit above the bands either side of it.
+The points above and below the main line are fuel-shift and runback
+plateaus. HDBSCAN puts them in "Unclassified / Transitional", together with
+the sparser stretches of the curve between the five bands, which keeps each
+load band to points that share its operating point. The off-curve points
+are also why that group's mean NOx and CO sit above the bands either side
+of it.
 
 ```bash
 .venv/bin/python -c "
@@ -345,7 +390,7 @@ emissions prediction tool. Key simplifications:
   sample interval, so the chamber is always fully settled to its current
   inputs at this resolution. This matches continuous time integration to
   0.012 K (p99) and is ~19x faster, which is what makes 30 days of
-  continuously moving AGC forcing tractable (~100 s/run instead of ~24 min).
+  continuously moving AGC forcing tractable (~100 s/run, down from ~24 min).
   The trade-off is that dynamics faster than a few residence times are not
   represented, which is fine for operating-point analysis at 15 s.
 
@@ -425,4 +470,3 @@ Detection and clustering:
 
 - [indsl.detect](https://indsl.docs.cognite.com/detect.html)
 - [scikit-learn](https://scikit-learn.org)
-- [Plotly](https://plotly.com/python/) (interactive detection plot)

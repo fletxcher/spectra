@@ -58,27 +58,55 @@ class Method:
     run: Callable[[pd.Series, float, str], pd.Series]  # (series, dt_seconds, channel) -> bool Series, True=steady
 
 
-def _ssd_cpd(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
-    min_distance = max(int(round(60.0 / dt_seconds)), 2)
-    out = indsl_detect.ssd_cpd(series, min_distance=min_distance, var_threshold=2.0, slope_threshold=-3.0)
+PELT_DT_S = 60.0
+PELT_MIN_DISTANCE = 2  # in PELT_DT_S samples: no segment shorter than 2 minutes
+
+
+def _minute_means(series: pd.Series) -> pd.Series:
+    """indsl's ssd_cpd and cpd_ed_pelt force-resample any input to >= 60 s
+    spacing by keeping only the samples that land on the 60 s grid, which
+    throws away 3 of every 4 samples at 15 s without averaging any noise
+    away. Averaging into 60 s blocks first makes that resample a no-op and
+    keeps the noise reduction."""
+    return series.resample(f"{PELT_DT_S:g}s").mean().dropna()
+
+
+def run_ssd_cpd(series: pd.Series, var_threshold: float, slope_threshold: float) -> pd.Series:
+    out = indsl_detect.ssd_cpd(
+        _minute_means(series), min_distance=PELT_MIN_DISTANCE, var_threshold=var_threshold, slope_threshold=slope_threshold
+    )
     return _align(out, series.index) == 1
 
 
+def _ssd_cpd(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
+    return run_ssd_cpd(series, var_threshold=2.0, slope_threshold=-3.0)
+
+
 # Calibrated via grid search (src/eval/calibrate.py) against a held-out
-# calibration slice, distinct from the evaluation run set.
+# calibration slice, distinct from the evaluation run set, keyed by the
+# calibration slice length in days. ED-Pelt segments a shorter series more
+# finely, so the best thresholds depend on the input length; the detector
+# uses the set calibrated on the length closest to its input.
 SSD_CPD_TUNED_PARAMS = {
-    "temperature": dict(var_threshold=100.0, slope_threshold=-4.0),
-    "pressure": dict(var_threshold=1.0, slope_threshold=-5.0),
-    "mass_flow": dict(var_threshold=100.0, slope_threshold=-6.0),
-    "phi": dict(var_threshold=50.0, slope_threshold=-7.0),
+    4.0: {
+        "temperature": dict(var_threshold=50.0, slope_threshold=-4.0),
+        "pressure": dict(var_threshold=5.0, slope_threshold=-4.0),
+        "mass_flow": dict(var_threshold=50.0, slope_threshold=-6.0),
+        "phi": dict(var_threshold=50.0, slope_threshold=-7.0),
+    },
+    1.0: {
+        "temperature": dict(var_threshold=20.0, slope_threshold=-6.0),
+        "pressure": dict(var_threshold=2.0, slope_threshold=-4.0),
+        "mass_flow": dict(var_threshold=50.0, slope_threshold=-6.0),
+        "phi": dict(var_threshold=20.0, slope_threshold=-7.0),
+    },
 }
 
 
 def _ssd_cpd_tuned(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
-    min_distance = max(int(round(60.0 / dt_seconds)), 2)
-    params = SSD_CPD_TUNED_PARAMS.get(channel, dict(var_threshold=5.0, slope_threshold=-5.0))
-    out = indsl_detect.ssd_cpd(series, min_distance=min_distance, **params)
-    return _align(out, series.index) == 1
+    span_days = (series.index[-1] - series.index[0]).total_seconds() / 86400.0
+    horizon = min(SSD_CPD_TUNED_PARAMS, key=lambda d: abs(np.log(d) - np.log(max(span_days, 1e-3))))
+    return run_ssd_cpd(series, **SSD_CPD_TUNED_PARAMS[horizon][channel])
 
 
 def _ssid(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
@@ -100,8 +128,7 @@ def _unchanged(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
 
 
 def _cpd_ed_pelt(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
-    min_distance = max(int(round(60.0 / dt_seconds)), 2)
-    cp = _align(indsl_detect.cpd_ed_pelt(series, min_distance=min_distance), series.index)
+    cp = _align(indsl_detect.cpd_ed_pelt(_minute_means(series), min_distance=PELT_MIN_DISTANCE), series.index)
     return _far_from_events(cp, series.index, window_seconds=60.0)
 
 
@@ -114,8 +141,8 @@ def _cusum(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:
 # noise-floor estimate (replaces indsl's default drift formula, which goes
 # deeply negative -- and thus fires constantly -- on absolute-scale signals
 # like Kelvin or Pascal).
-CUSUM_K_DRIFT = 1.0
-CUSUM_K_THRESH = 3.0
+CUSUM_K_DRIFT = 2.0
+CUSUM_K_THRESH = 12.0
 
 
 def _cusum_tuned(series: pd.Series, dt_seconds: float, channel: str) -> pd.Series:

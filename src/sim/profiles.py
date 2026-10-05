@@ -17,6 +17,11 @@ import pandas as pd
 
 TransitionKind = Literal["step", "ramp", "oscillation"]
 STABILITY_WINDOW_S = 60.0
+# An AGC-only excursion outside the band must persist this long to count as
+# transient. Shorter ones are AGC grazing the band edge, which a hard
+# threshold on a wandering signal turns into tens of thousands of ~30 s
+# flickers per run that don't correspond to any real operating-point change.
+MIN_AGC_TRANSIENT_S = 120.0
 DisturbanceKind = Literal["runback", "fuel_shift", "dynamics"]
 
 
@@ -129,9 +134,11 @@ class Profile:
     in progress (`label_at`), AND the commanded operating point has been
     stable over the trailing STABILITY_WINDOW_S: load stayed inside a
     +/-`steady_tolerance` band (range <= 2 * tolerance, in load_fraction
-    units) and phi inside the equivalent band (`steady_mask`). Stability is
-    judged on the signal's own recent history, not distance from the
-    dispatch target, because a detector can only ever observe the former.
+    units) and phi inside the equivalent band (`steady_mask`), unless the
+    band was only left by AGC for less than MIN_AGC_TRANSIENT_S
+    (`steady_labels`). Stability is judged on the signal's own recent
+    history, not distance from the dispatch target, because a detector can
+    only ever observe the former.
 
     With runs spanning many hundreds of segments (a 30-day dispatch
     schedule), lookups are done via `bisect` against precomputed start
@@ -247,6 +254,21 @@ class Profile:
 
         phi_band = self.steady_tolerance * self.agc_phi_per_load
         return stable(load, self.steady_tolerance) & stable(phi, phi_band)
+
+    def steady_labels(self, time_s: np.ndarray, load: np.ndarray, phi: np.ndarray, settled: np.ndarray) -> np.ndarray:
+        """Full ground-truth steady label. `settled` is `label_at` evaluated
+        at each sample (ramps and disturbance transients always count as not
+        steady). On top of that, samples outside the stability band are not
+        steady, except AGC-only gaps shorter than MIN_AGC_TRANSIENT_S, which
+        are filled back in as steady-with-jitter."""
+        steady = settled & self.steady_mask(time_s, load, phi)
+        edges = np.flatnonzero(np.diff(np.concatenate(([1], steady.astype(np.int8), [1]))))
+        end_time = np.append(time_s, time_s[-1] + (time_s[-1] - time_s[-2] if len(time_s) > 1 else 0.0))
+        for a, b in zip(edges[0::2], edges[1::2]):
+            agc_only = settled[a:b].all()
+            if agc_only and end_time[b] - time_s[a] < MIN_AGC_TRANSIENT_S:
+                steady[a:b] = True
+        return steady
 
     def sample_times(self, fine_dt: float, coarse_dt: float, fine_window: float) -> np.ndarray:
         """Non-uniform output times: `fine_dt` resolution through each

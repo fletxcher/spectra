@@ -108,64 +108,85 @@ def write_conditions_txt(result: RunResult, path: str | Path) -> None:
     Path(path).write_text("\n".join(lines) + "\n")
 
 
-def plot_temperature(result: RunResult, path: str | Path) -> None:
-    df = result.df
-    days = df.time / 86400.0
+def time_axis(ax, time_s) -> np.ndarray:
+    """Puts a time axis flush against the plot edges: hours (2 h ticks) for
+    windows up to 2 days, days (5-day ticks) beyond that. Returns the time
+    values in the chosen unit."""
+    time_s = np.asarray(time_s, dtype=float)
+    span_s = time_s.max() if len(time_s) else 0.0
+    if span_s <= 2 * 86400.0:
+        values, unit, tick = time_s / 3600.0, "hours", 2
+        end = np.ceil(span_s / 3600.0)
+    else:
+        values, unit, tick = time_s / 86400.0, "days", 5
+        end = np.ceil(span_s / 86400.0)
+    ax.xaxis.set_major_locator(MultipleLocator(tick))
+    ax.set_xlim(0, end)
+    ax.set_xlabel(f"time [{unit}]")
+    return values
 
+
+def window_label(time_s) -> str:
+    span_s = float(np.max(time_s))
+    if span_s <= 2 * 86400.0:
+        return f"over {np.ceil(span_s / 3600.0):.0f} hours"
+    return f"over {np.ceil(span_s / 86400.0):.0f} days"
+
+
+def plot_temperature_window(df, run_id: str, region_name: str, path: str | Path) -> None:
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    ax.plot(days, df.temperature_truth, label="chamber temperature (TIT proxy, truth)", color="tab:red", lw=0.9)
-    ax.plot(days, df.temperature, label="chamber temperature (observed)", color="tab:red", alpha=0.25, lw=0.5)
-    ax.step(days, df.adiabatic_flame_temp, where="post", label="adiabatic flame temperature", color="black", ls="--", lw=0.8)
+    t = time_axis(ax, df.time)
+    ax.plot(t, df.temperature_truth, label="chamber temperature (TIT proxy, truth)", color="tab:red", lw=0.9)
+    ax.plot(t, df.temperature, label="chamber temperature (observed)", color="tab:red", alpha=0.25, lw=0.5)
+    ax.step(t, df.adiabatic_flame_temp, where="post", label="adiabatic flame temperature", color="black", ls="--", lw=0.8)
 
-    ax.xaxis.set_major_locator(MultipleLocator(5))
-    ax.set_xlim(0, days.max())
     ax.grid(axis="x", color="gray", ls=":", lw=0.4, alpha=0.6)
-    ax.set_xlabel("time [days]")
     ax.set_ylabel("temperature [K]")
-    region_name = REGIONS[result.case.region_name].name
-    ax.set_title(f"{result.case.run_id} ({region_name}): chamber / adiabatic flame temperature over 30 days")
+    ax.set_title(f"{run_id} ({region_name}): chamber / adiabatic flame temperature {window_label(df.time)}")
     ax.legend(loc="lower right")
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
 
 
-def plot_emissions(result: RunResult, path: str | Path) -> None:
+def plot_emissions_window(df, run_id: str, region_name: str, path: str | Path) -> None:
     """NOx (NO+NO2) and CO, converted from tracked species mass fractions to
-    molar ppm (wet, uncorrected -- no dry/15%-O2 correction is applied, so
+    molar ppm (wet, uncorrected: no dry/15%-O2 correction is applied, so
     treat these as relative trends rather than compliance-grade figures)."""
     # Drop the very first sample: the combustor is initialized at full
     # chemical equilibrium (so it starts already alight), which briefly
     # drives trace species (NO, CO) to their equilibrium rather than
-    # kinetically-limited level -- a one-sample artifact that would otherwise
+    # kinetically-limited level, a one-sample artifact that would otherwise
     # dominate the axis scale.
-    df = result.df.iloc[1:]
-    days = df.time / 86400.0
-
+    df = df.iloc[1:]
     nox_ppm = (df.Y_NO / _MW_NO + df.Y_NO2 / _MW_NO2) * df.mean_molecular_weight * 1e6
     co_ppm = (df.Y_CO / _MW_CO) * df.mean_molecular_weight * 1e6
 
     fig, ax_nox = plt.subplots(figsize=(11, 4.5))
     ax_co = ax_nox.twinx()
+    t = time_axis(ax_nox, df.time)
 
-    (line_nox,) = ax_nox.plot(days, nox_ppm, color="tab:purple", lw=0.8, label="NOx")
+    (line_nox,) = ax_nox.plot(t, nox_ppm, color="tab:purple", lw=0.8, label="NOx")
     ax_nox.set_ylim(0, nox_ppm.max() * 1.1)
     ax_nox.set_ylabel("NOx [ppm]", color="tab:purple")
     ax_nox.tick_params(axis="y", colors="tab:purple")
     ax_nox.grid(axis="x", color="gray", ls=":", lw=0.4, alpha=0.6)
 
-    (line_co,) = ax_co.plot(days, co_ppm, color="tab:blue", lw=0.8, label="CO")
+    (line_co,) = ax_co.plot(t, co_ppm, color="tab:blue", lw=0.8, label="CO")
     ax_co.set_ylim(0, co_ppm.max() * 1.1)
     ax_co.set_ylabel("CO [ppm]", color="tab:blue")
     ax_co.tick_params(axis="y", colors="tab:blue")
 
-    ax_nox.set_xlabel("time [days]")
-    ax_nox.xaxis.set_major_locator(MultipleLocator(5))
-    ax_nox.set_xlim(0, days.max())
     ax_nox.legend(handles=[line_nox, line_co], loc="upper right")
-
-    region_name = REGIONS[result.case.region_name].name
-    ax_nox.set_title(f"{result.case.run_id} ({region_name}): NOx and CO emissions over 30 days")
+    ax_nox.set_title(f"{run_id} ({region_name}): NOx and CO emissions {window_label(df.time)}")
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
+
+
+def plot_temperature(result: RunResult, path: str | Path) -> None:
+    plot_temperature_window(result.df, result.case.run_id, REGIONS[result.case.region_name].name, path)
+
+
+def plot_emissions(result: RunResult, path: str | Path) -> None:
+    plot_emissions_window(result.df, result.case.run_id, REGIONS[result.case.region_name].name, path)

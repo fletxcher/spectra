@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from src.eval.labels import steady_window_label, to_datetime_index
+from src.eval.methods import run_ssd_cpd
 from src.eval.metrics import point_metrics
 
 CALIBRATION_RUN_IDS = ["run_00001", "run_00051", "run_00101", "run_00151", "run_00176"]
@@ -46,11 +47,11 @@ def _noise_std(series: pd.Series) -> float:
     return float(series.diff().std() / np.sqrt(2))
 
 
-def _load_calibration_slices(channel_col: str) -> list[tuple[pd.Series, pd.Series]]:
+def _load_calibration_slices(channel_col: str, days: float = CALIBRATION_DAYS) -> list[tuple[pd.Series, pd.Series]]:
     slices = []
     for run_id in CALIBRATION_RUN_IDS:
         df = pd.read_parquet(Path("datasets") / run_id / "data.parquet", columns=["time", "is_steady", channel_col])
-        df = df[df.time < CALIBRATION_DAYS * 86400.0]
+        df = df[df.time < days * 86400.0]
         idx = to_datetime_index(df["time"])
         series = pd.Series(df[channel_col].to_numpy(), index=idx)
         y_true = steady_window_label(pd.Series(df["is_steady"].to_numpy(), index=idx))
@@ -58,8 +59,8 @@ def _load_calibration_slices(channel_col: str) -> list[tuple[pd.Series, pd.Serie
     return slices
 
 
-def calibrate_cusum(channel: str) -> list[dict]:
-    slices = _load_calibration_slices(CHANNELS[channel])
+def calibrate_cusum(channel: str, days: float = CALIBRATION_DAYS) -> list[dict]:
+    slices = _load_calibration_slices(CHANNELS[channel], days)
     results = []
     for k_drift, k_thresh in itertools.product(CUSUM_K_DRIFT, CUSUM_K_THRESH):
         scores = []
@@ -77,40 +78,40 @@ def calibrate_cusum(channel: str) -> list[dict]:
     return results
 
 
-def calibrate_ssd_cpd(channel: str) -> list[dict]:
+def calibrate_ssd_cpd(channel: str, days: float = CALIBRATION_DAYS) -> list[dict]:
     """Per-channel (var_threshold, slope_threshold) grid, since the std/n
     segment-length bias and ED-Pelt's own segmentation behavior differ by
     channel noise/dynamics."""
-    slices = _load_calibration_slices(CHANNELS[channel])
-    min_distance = max(int(round(60.0 / 15.0)), 2)
+    slices = _load_calibration_slices(CHANNELS[channel], days)
     results = []
     for var_threshold, slope_threshold in itertools.product(SSD_VAR_THRESHOLD, SSD_SLOPE_THRESHOLD):
         scores = []
         for series, y_true in slices:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                out = indsl_detect.ssd_cpd(
-                    series, min_distance=min_distance, var_threshold=var_threshold, slope_threshold=slope_threshold
-                )
-            y_pred = out.reindex(series.index).ffill().fillna(0) == 1
+                y_pred = run_ssd_cpd(series, var_threshold=var_threshold, slope_threshold=slope_threshold)
             scores.append(point_metrics(y_true, y_pred))
         results.append({"var_threshold": var_threshold, "slope_threshold": slope_threshold, **_summarize(scores)})
         print(channel, results[-1], flush=True)
     return results
 
 
-def best_cusum(result_dir: str | Path = ".") -> dict:
+def _result_path(method: str, channel: str, suffix: str = "", result_dir: str | Path = ".") -> Path:
+    return Path(result_dir) / f"calib_{method}_{channel}{suffix}.json"
+
+
+def best_cusum(result_dir: str | Path = ".", suffix: str = "") -> dict:
     """Global (k_drift, k_thresh) with the best MCC averaged over channels."""
     by_params: dict[tuple[float, float], list[float]] = {}
     for channel in CHANNELS:
-        for r in json.loads((Path(result_dir) / f"calib_cusum_{channel}.json").read_text()):
+        for r in json.loads(_result_path("cusum", channel, suffix, result_dir).read_text()):
             by_params.setdefault((r["k_drift"], r["k_thresh"]), []).append(r["mean_mcc"])
     (k_drift, k_thresh), mccs = max(by_params.items(), key=lambda kv: np.mean(kv[1]))
     return {"k_drift": k_drift, "k_thresh": k_thresh, "mean_mcc": float(np.mean(mccs))}
 
 
-def best_ssd_cpd(channel: str, result_dir: str | Path = ".") -> dict:
-    results = json.loads((Path(result_dir) / f"calib_ssd_cpd_{channel}.json").read_text())
+def best_ssd_cpd(channel: str, result_dir: str | Path = ".", suffix: str = "") -> dict:
+    results = json.loads(_result_path("ssd_cpd", channel, suffix, result_dir).read_text())
     return max(results, key=lambda r: r["mean_mcc"])
 
 
@@ -124,7 +125,11 @@ def _summarize(scores: list) -> dict:
 
 
 if __name__ == "__main__":
+    # optional third argument: number of days per calibration run (default CALIBRATION_DAYS);
+    # a non-default value writes calib_<method>_<channel>_<N>d.json alongside the default results
     method, channel = sys.argv[1], sys.argv[2]
+    days = float(sys.argv[3]) if len(sys.argv) > 3 else CALIBRATION_DAYS
+    suffix = "" if days == CALIBRATION_DAYS else f"_{days:g}d"
     fn = {"ssd_cpd": calibrate_ssd_cpd, "cusum": calibrate_cusum}[method]
-    Path(f"calib_{method}_{channel}.json").write_text(json.dumps(fn(channel), indent=2))
+    _result_path(method, channel, suffix).write_text(json.dumps(fn(channel, days), indent=2))
     print("DONE", flush=True)

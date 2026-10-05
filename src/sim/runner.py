@@ -142,8 +142,8 @@ def run_case(case: SimCase) -> RunResult:
         )
 
     df = pd.DataFrame.from_records(rows)
-    df["is_steady"] = df["is_steady"].to_numpy() & case.profile.steady_mask(
-        df["time"].to_numpy(), df["load_cmd"].to_numpy(), df["phi_cmd"].to_numpy()
+    df["is_steady"] = case.profile.steady_labels(
+        df["time"].to_numpy(), df["load_cmd"].to_numpy(), df["phi_cmd"].to_numpy(), df["is_steady"].to_numpy()
     )
 
     mdot_total_ref = network.mdot_air_ref + network.mdot_fuel_ref
