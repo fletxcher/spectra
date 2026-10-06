@@ -11,7 +11,7 @@ process:
     .venv/bin/python -m src.eval.calibrate ssd_cpd temperature
     .venv/bin/python -m src.eval.calibrate cusum pressure
 
-Each writes calib_<method>_<channel>.json. cusum uses one global
+Each writes results/calibration/calib_<method>_<channel>.json. cusum uses one global
 (k_drift, k_thresh) pair, chosen by mean MCC across the four per-channel
 result files (see `best_cusum`).
 """
@@ -34,6 +34,7 @@ from src.eval.metrics import point_metrics
 
 CALIBRATION_RUN_IDS = ["run_00001", "run_00051", "run_00101", "run_00151", "run_00176"]
 CALIBRATION_DAYS = 4
+RESULTS_DIR = Path("results/calibration")
 CHANNELS = {"temperature": "temperature", "pressure": "pressure", "mass_flow": "mdot_air", "phi": "phi_cmd"}
 
 CUSUM_K_DRIFT = [0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
@@ -96,11 +97,11 @@ def calibrate_ssd_cpd(channel: str, days: float = CALIBRATION_DAYS) -> list[dict
     return results
 
 
-def _result_path(method: str, channel: str, suffix: str = "", result_dir: str | Path = ".") -> Path:
+def _result_path(method: str, channel: str, suffix: str = "", result_dir: str | Path = RESULTS_DIR) -> Path:
     return Path(result_dir) / f"calib_{method}_{channel}{suffix}.json"
 
 
-def best_cusum(result_dir: str | Path = ".", suffix: str = "") -> dict:
+def best_cusum(result_dir: str | Path = RESULTS_DIR, suffix: str = "") -> dict:
     """Global (k_drift, k_thresh) with the best MCC averaged over channels."""
     by_params: dict[tuple[float, float], list[float]] = {}
     for channel in CHANNELS:
@@ -110,7 +111,7 @@ def best_cusum(result_dir: str | Path = ".", suffix: str = "") -> dict:
     return {"k_drift": k_drift, "k_thresh": k_thresh, "mean_mcc": float(np.mean(mccs))}
 
 
-def best_ssd_cpd(channel: str, result_dir: str | Path = ".", suffix: str = "") -> dict:
+def best_ssd_cpd(channel: str, result_dir: str | Path = RESULTS_DIR, suffix: str = "") -> dict:
     results = json.loads(_result_path("ssd_cpd", channel, suffix, result_dir).read_text())
     return max(results, key=lambda r: r["mean_mcc"])
 
@@ -131,5 +132,6 @@ if __name__ == "__main__":
     days = float(sys.argv[3]) if len(sys.argv) > 3 else CALIBRATION_DAYS
     suffix = "" if days == CALIBRATION_DAYS else f"_{days:g}d"
     fn = {"ssd_cpd": calibrate_ssd_cpd, "cusum": calibrate_cusum}[method]
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     _result_path(method, channel, suffix).write_text(json.dumps(fn(channel, days), indent=2))
     print("DONE", flush=True)

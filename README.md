@@ -256,11 +256,11 @@ plot for every other region's sample run is in
 `samples/<region>/detection_before_after.png`.
 
 ```bash
-# calibration on the first day: one process per (method, channel), each writes calib_<method>_<channel>_1d.json
+# calibration on the first day: one process per (method, channel), each writes results/calibration/calib_<method>_<channel>_1d.json
 .venv/bin/python -m src.eval.calibrate ssd_cpd temperature 1
 .venv/bin/python -m src.eval.calibrate cusum temperature 1
 
-# one-day evaluation of every non-calibration run (~10 min on 3 workers), writes eval_results_all_1d.parquet
+# one-day evaluation of every non-calibration run (~10 min on 3 workers), writes results/eval/eval_results_all_1d.parquet
 .venv/bin/python -m src.eval.run_eval --days 1 --runs all --workers 3
 
 # regenerate everything under samples/ (grouping example runs as args)
@@ -347,12 +347,8 @@ are also why that group's mean NOx and CO sit above the bands either side
 of it.
 
 ```bash
-.venv/bin/python -c "
-from src.cluster.run_cluster import cluster_sweep
-summary, points = cluster_sweep('datasets')
-summary.to_parquet('cluster_summary.parquet', index=False)
-points.to_parquet('cluster_points.parquet', index=False)
-"
+# writes results/clustering/cluster_summary.parquet and cluster_points.parquet
+.venv/bin/python -m src.cluster.run_cluster
 ```
 
 ## Modeling assumptions

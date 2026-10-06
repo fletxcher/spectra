@@ -57,3 +57,13 @@ def cluster_sweep(dataset_dir: str | Path, run_ids: list[str] | None = None) -> 
             print(f"[{i + 1}/{len(run_dirs)}] clustered {run_dir.name}", flush=True)
 
     return pd.DataFrame.from_records(summaries), pd.concat(all_points, ignore_index=True)
+
+
+RESULTS_DIR = Path("results/clustering")
+
+if __name__ == "__main__":
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    summary, points = cluster_sweep("datasets")
+    summary.to_parquet(RESULTS_DIR / "cluster_summary.parquet", index=False)
+    points.to_parquet(RESULTS_DIR / "cluster_points.parquet", index=False)
+    print(f"wrote {len(summary)} runs / {len(points)} steady points to {RESULTS_DIR}/", flush=True)

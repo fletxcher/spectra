@@ -126,6 +126,7 @@ def evaluate_sweep(
 
 # every 5th run, disjoint from the calibration runs in src/eval/calibrate.py
 EVAL_RUN_IDS = [f"run_{i:05d}" for i in range(0, 200, 5)]
+RESULTS_DIR = Path("results/eval")
 
 if __name__ == "__main__":
     import argparse
@@ -137,7 +138,7 @@ if __name__ == "__main__":
         "--runs", choices=["eval", "all"], default="eval",
         help="eval: the 40-run evaluation set; all: every run except the calibration runs",
     )
-    parser.add_argument("--out", default=None, help="default: eval_results[_all][_<N>d].parquet")
+    parser.add_argument("--out", default=None, help="default: results/eval/eval_results[_all][_<N>d].parquet")
     args = parser.parse_args()
 
     if args.runs == "all":
@@ -147,7 +148,8 @@ if __name__ == "__main__":
     else:
         run_ids = EVAL_RUN_IDS
     suffix = ("_all" if args.runs == "all" else "") + ("" if args.days is None else f"_{args.days:g}d")
-    out = args.out or f"eval_results{suffix}.parquet"
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    out = args.out or RESULTS_DIR / f"eval_results{suffix}.parquet"
     results = evaluate_sweep("datasets", run_ids, workers=args.workers, days=args.days)
     results.to_parquet(out, index=False)
     print(f"wrote {len(results)} rows to {out}", flush=True)
